@@ -2,22 +2,14 @@
 
 import { useEffect, useRef, useState } from "react"
 import { isDesktop } from "@/lib/transport"
-import type { PetState } from "@/lib/pet/animation"
+import {
+  PET_ONESHOT_KINDS,
+  type PetOneShotKind,
+  type PetState,
+} from "@/lib/pet/animation"
 
 const PET_ONESHOT_EVENT = "pet://oneshot"
-
-// Subset of `PetState` rows that backend emits as oneshots. The mapper and
-// `pet_celebrate` only ever push `jumping`, `waving`, or `failed`; the
-// ambient rows (`idle`, `running`, `waiting`, `review`, `running_left/right`)
-// belong to `pet://state` and are intentionally excluded here so the
-// renderer never plays an ambient row as a one-shot override.
-export type PetOneShotKind = "jumping" | "waving" | "failed"
-
-const ONESHOT_KINDS: ReadonlySet<string> = new Set([
-  "jumping",
-  "waving",
-  "failed",
-])
+const ONESHOT_KINDS: ReadonlySet<string> = new Set(PET_ONESHOT_KINDS)
 
 export interface PetOneShotEvent {
   kind: PetOneShotKind

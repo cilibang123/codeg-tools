@@ -14,6 +14,7 @@ import { getTransport, isDesktop } from "@/lib/transport"
 import {
   PET_FRAME_DURATIONS_MS,
   PET_ONESHOT_LOOPS,
+  type PetOneShotKind,
   type PetState,
 } from "@/lib/pet/animation"
 import { usePetState } from "../_hooks/usePetState"
@@ -48,7 +49,7 @@ function sumDurations(state: PetState): number {
 // "hold for N loops then unstick" model as user interactions. Loop counts
 // live in `PET_ONESHOT_LOOPS` so designers can tune them without touching
 // component code.
-function oneShotDuration(state: "jumping" | "waving" | "failed"): number {
+function oneShotDuration(state: PetOneShotKind): number {
   return sumDurations(state) * PET_ONESHOT_LOOPS[state] + INTERACTION_SLACK_MS
 }
 
