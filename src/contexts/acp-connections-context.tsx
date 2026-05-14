@@ -760,6 +760,12 @@ function connectionsReducer(
     case "HYDRATE_FROM_SNAPSHOT": {
       const current = state.get(action.contextKey)
       if (!current) return state
+      // Identity guard: the connection at this contextKey may have been
+      // disconnected and replaced between the snapshot fetch firing and
+      // its async response. eventSeq alone is not enough — a stale snapshot
+      // from connection A (high seq) would otherwise overwrite a fresh
+      // connection B (lastAppliedSeq=0) at the same contextKey.
+      if (current.connectionId !== action.patch.connectionId) return state
       // Race guard: the snapshot may have been generated BEFORE events
       // that have since arrived and been applied to in-memory state.
       // Hydrating from a stale snapshot would overwrite fresh state.
