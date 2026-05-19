@@ -600,7 +600,6 @@
       "emptyProvider": "아직 Provider가 없습니다. ID를 입력한 뒤 \"Provider 추가\"를 클릭하세요.",
       "providerEnabledState": "{providerId} 활성 상태",
       "selectProviderNpm": "provider.npm 선택",
-      "notSet": "설정 안 됨",
       "modelManagement": "모델 관리",
       "modelCount": "모델 {count}개",
       "modelDescription": "OpenCode `provider.models`와 정렬됩니다. 빠른 관리는 현재 `name` / `id`를 지원하며, 기타 고급 필드는 유지되고 아래 네이티브 JSON에서 편집할 수 있습니다.",

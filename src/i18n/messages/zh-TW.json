@@ -600,7 +600,6 @@
       "emptyProvider": "暫無 Provider，輸入 ID 後點擊「新增 Provider」建立。",
       "providerEnabledState": "{providerId} 啟用狀態",
       "selectProviderNpm": "選擇 provider.npm",
-      "notSet": "未設定",
       "modelManagement": "模型管理",
       "modelCount": "共 {count} 個",
       "modelDescription": "對齊 OpenCode `provider.models` 結構。目前支援 `name` / `id` 快速管理；其它進階欄位會保留，可在下方原生 JSON 中繼續編輯。",

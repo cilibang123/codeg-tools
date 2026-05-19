@@ -600,7 +600,6 @@
       "emptyProvider": "لا يوجد مزود بعد. أدخل معرّفًا ثم انقر \"إضافة مزود\".",
       "providerEnabledState": "حالة تفعيل {providerId}",
       "selectProviderNpm": "اختر provider.npm",
-      "notSet": "غير مضبوط",
       "modelManagement": "إدارة النماذج",
       "modelCount": "{count} نماذج",
       "modelDescription": "متوافق مع `provider.models` في OpenCode. الإدارة السريعة تدعم حاليًا `name` / `id`؛ بينما تُحفظ الحقول المتقدمة الأخرى ويمكن تعديلها في JSON الأصلي أدناه.",

@@ -600,7 +600,6 @@
       "emptyProvider": "Noch kein Provider vorhanden. ID eingeben und dann auf „Provider hinzufügen“ klicken.",
       "providerEnabledState": "{providerId} Aktivierungsstatus",
       "selectProviderNpm": "provider.npm auswählen",
-      "notSet": "Nicht gesetzt",
       "modelManagement": "Modellverwaltung",
       "modelCount": "{count} Modelle",
       "modelDescription": "Ausgerichtet an OpenCode `provider.models`. Schnellverwaltung unterstützt derzeit `name` / `id`; andere erweiterte Felder bleiben erhalten und können unten im nativen JSON bearbeitet werden.",

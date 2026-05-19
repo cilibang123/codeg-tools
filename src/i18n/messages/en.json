@@ -600,7 +600,6 @@
       "emptyProvider": "No provider yet. Enter an ID then click \"Add Provider\".",
       "providerEnabledState": "{providerId} enabled state",
       "selectProviderNpm": "Select provider.npm",
-      "notSet": "Not set",
       "modelManagement": "Model Management",
       "modelCount": "{count} models",
       "modelDescription": "Aligned with OpenCode `provider.models`. Fast management currently supports `name` / `id`; other advanced fields are preserved and can be edited in native JSON below.",

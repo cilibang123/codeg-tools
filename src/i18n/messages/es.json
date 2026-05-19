@@ -600,7 +600,6 @@
       "emptyProvider": "Aún no hay proveedor. Introduce un ID y haz clic en \"Agregar proveedor\".",
       "providerEnabledState": "Estado habilitado de {providerId}",
       "selectProviderNpm": "Seleccionar provider.npm",
-      "notSet": "No establecido",
       "modelManagement": "Gestión de modelos",
       "modelCount": "{count} modelos",
       "modelDescription": "Alineado con `provider.models` de OpenCode. La gestión rápida actualmente soporta `name` / `id`; otros campos avanzados se conservan y se pueden editar en el JSON nativo de abajo.",

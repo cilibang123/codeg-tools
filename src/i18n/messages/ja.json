@@ -600,7 +600,6 @@
       "emptyProvider": "まだプロバイダーがありません。ID を入力して「プロバイダーを追加」をクリックしてください。",
       "providerEnabledState": "{providerId} の有効状態",
       "selectProviderNpm": "provider.npm を選択",
-      "notSet": "未設定",
       "modelManagement": "モデル管理",
       "modelCount": "{count} 個のモデル",
       "modelDescription": "OpenCode の `provider.models` に準拠。高速管理では現在 `name` / `id` をサポートし、その他の高度な項目は保持され、下部のネイティブ JSON で編集できます。",

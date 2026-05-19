@@ -4280,6 +4280,7 @@ export function AcpAgentSettings() {
         config.provider = providerRoot
       }
       providerRoot[providerId] = {
+        npm: OPENCODE_PROVIDER_NPM_OPTIONS[0].value,
         options: {},
         models: {},
       }
@@ -6510,15 +6511,14 @@ supports_websockets = true`}
                                             value={
                                               provider.npm.trim()
                                                 ? provider.npm
-                                                : "__none__"
+                                                : OPENCODE_PROVIDER_NPM_OPTIONS[0]
+                                                    .value
                                             }
                                             onValueChange={(value) => {
                                               handleOpenCodeProviderFieldChange(
                                                 providerId,
                                                 "npm",
-                                                value === "__none__"
-                                                  ? ""
-                                                  : value
+                                                value
                                               )
                                             }}
                                           >
@@ -6530,9 +6530,6 @@ supports_websockets = true`}
                                               />
                                             </SelectTrigger>
                                             <SelectContent align="start">
-                                              <SelectItem value="__none__">
-                                                {t("openCode.notSet")}
-                                              </SelectItem>
                                               {buildOpenCodeNpmOptions(
                                                 provider.npm
                                               ).map((npmOption) => (
