@@ -595,3 +595,114 @@ pub async fn weixin_check_qrcode(
 ) -> Result<WeixinQrcodeStatusPublic, AppCommandError> {
     weixin_check_qrcode_core(&db, channel_id, &qrcode).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::test_helpers::fresh_in_memory_db;
+
+    #[tokio::test]
+    async fn list_chat_channels_is_empty_on_fresh_db() {
+        let db = fresh_in_memory_db().await;
+        let channels = list_chat_channels_core(&db).await.expect("list");
+        assert!(channels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_then_list_chat_channel_roundtrip() {
+        let db = fresh_in_memory_db().await;
+        let created = create_chat_channel_core(
+            &db,
+            "test-channel".to_string(),
+            "telegram".to_string(),
+            "{}".to_string(),
+            true,
+            false,
+            None,
+        )
+        .await
+        .expect("create");
+        assert_eq!(created.name, "test-channel");
+        assert_eq!(created.channel_type, "telegram");
+
+        let channels = list_chat_channels_core(&db).await.expect("list");
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].id, created.id);
+    }
+
+    #[tokio::test]
+    async fn create_chat_channel_rejects_invalid_type() {
+        let db = fresh_in_memory_db().await;
+        let result = create_chat_channel_core(
+            &db,
+            "x".to_string(),
+            "not-a-real-channel-kind".to_string(),
+            "{}".to_string(),
+            true,
+            false,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn chat_command_prefix_default_and_roundtrip() {
+        let db = fresh_in_memory_db().await;
+        let default_prefix = get_chat_command_prefix_core(&db).await.expect("get default");
+        assert_eq!(default_prefix, DEFAULT_COMMAND_PREFIX);
+
+        set_chat_command_prefix_core(&db, "$".to_string())
+            .await
+            .expect("set");
+        let updated = get_chat_command_prefix_core(&db).await.expect("get after set");
+        assert_eq!(updated, "$");
+    }
+
+    #[tokio::test]
+    async fn chat_command_prefix_rejects_alphanumeric() {
+        let db = fresh_in_memory_db().await;
+        assert!(set_chat_command_prefix_core(&db, "a".to_string()).await.is_err());
+        assert!(set_chat_command_prefix_core(&db, "".to_string()).await.is_err());
+        assert!(set_chat_command_prefix_core(&db, "$$$$".to_string()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn chat_message_language_default_is_en() {
+        let db = fresh_in_memory_db().await;
+        let lang = get_chat_message_language_core(&db).await.expect("get");
+        assert_eq!(lang, "en");
+    }
+
+    #[tokio::test]
+    async fn chat_message_language_validates_supported_codes() {
+        let db = fresh_in_memory_db().await;
+        assert!(set_chat_message_language_core(&db, "zh-CN".to_string()).await.is_ok());
+        let stored = get_chat_message_language_core(&db).await.expect("get");
+        // Implementation lowercases before storing.
+        assert_eq!(stored, "zh-cn");
+
+        assert!(set_chat_message_language_core(&db, "klingon".to_string()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn chat_event_filter_none_by_default() {
+        let db = fresh_in_memory_db().await;
+        let filter = get_chat_event_filter_core(&db).await.expect("get");
+        assert!(filter.is_none());
+    }
+
+    #[tokio::test]
+    async fn chat_event_filter_roundtrip_some_and_none() {
+        let db = fresh_in_memory_db().await;
+        set_chat_event_filter_core(&db, Some(vec!["session_started".into(), "turn_complete".into()]))
+            .await
+            .expect("set some");
+        let got = get_chat_event_filter_core(&db).await.expect("get some");
+        assert_eq!(got.as_deref(), Some(["session_started".to_string(), "turn_complete".to_string()].as_slice()));
+
+        set_chat_event_filter_core(&db, None).await.expect("set none");
+        let got_none = get_chat_event_filter_core(&db).await.expect("get none");
+        assert!(got_none.is_none());
+    }
+}

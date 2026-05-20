@@ -114,6 +114,8 @@ libc = "0.2"
 tempfile = "3"
 temp-env = "0.3"
 tokio = { version = "1", features = ["test-util", "macros", "rt", "sync", "time"] }
+insta = { version = "1", features = ["json", "redactions"] }
+axum-test = "17"
 
 [patch.crates-io]
 sacp-tokio = { path = "vendor/sacp-tokio" }

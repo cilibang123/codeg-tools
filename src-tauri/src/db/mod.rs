@@ -3,7 +3,7 @@ pub mod error;
 pub mod migration;
 pub mod service;
 
-#[cfg(test)]
+#[doc(hidden)]
 pub mod test_helpers;
 
 use std::path::Path;

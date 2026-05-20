@@ -351,6 +351,13 @@ impl OpenClawParser {
         Self { base_dir }
     }
 
+    /// Test-only constructor that lets callers point the parser at a fixture
+    /// directory instead of `~/.openclaw/agents`.
+    #[doc(hidden)]
+    pub fn with_base_dir(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+
     /// Read sessions.json for a given agent directory.
     fn read_session_index(agent_dir: &Path) -> Result<HashMap<String, SessionMeta>, ParseError> {
         let index_path = agent_dir.join("sessions").join("sessions.json");

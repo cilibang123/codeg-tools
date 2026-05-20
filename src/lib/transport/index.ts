@@ -84,3 +84,18 @@ export function isRemoteDesktopMode(): boolean {
 export function notifyRemoteDesktopUnauthorized(): void {
   _remoteConfig?.onUnauthorized?.()
 }
+
+/**
+ * Test-only: clear the cached shell + remote transports so a subsequent
+ * `getTransport()` / `getShellTransport()` call re-runs environment detection
+ * against the current `window` mock. The module-level singletons would
+ * otherwise stick across test cases. Not intended for production use.
+ * @internal
+ */
+export function __resetTransportForTests(): void {
+  _shellTransport?.destroy?.()
+  _remoteTransport?.destroy?.()
+  _shellTransport = null
+  _remoteTransport = null
+  _remoteConfig = null
+}

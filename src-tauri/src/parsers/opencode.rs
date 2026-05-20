@@ -22,6 +22,13 @@ impl OpenCodeParser {
         Self { base_dir }
     }
 
+    /// Test-only constructor that lets callers point the parser at a fixture
+    /// directory containing an `opencode.db` SQLite file.
+    #[doc(hidden)]
+    pub fn with_base_dir(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+
     fn sqlite_db_path(&self) -> PathBuf {
         self.base_dir.join("opencode.db")
     }

@@ -451,3 +451,79 @@ pub async fn pet_save_window_state(
 
     Ok(new_config)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::test_helpers::fresh_in_memory_db;
+
+    #[tokio::test]
+    async fn pet_settings_returns_defaults_on_fresh_db() {
+        let db = fresh_in_memory_db().await;
+        let cfg = pet_get_settings_core(&db.conn).await.expect("get");
+        // Default config should be the type's `Default` impl — no panic, no
+        // null active id (regression guard against schema drift).
+        assert!(cfg.active_pet_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn pet_save_window_state_patches_individual_fields() {
+        let db = fresh_in_memory_db().await;
+        let patch = PetWindowStatePatch {
+            x: Some(42.0),
+            y: Some(99.0),
+            scale: Some(1.5),
+            always_on_top: Some(true),
+            enabled: None,
+        };
+        let cfg = pet_save_window_state_core(&db.conn, patch)
+            .await
+            .expect("save");
+        assert_eq!(cfg.x, Some(42.0));
+        assert_eq!(cfg.y, Some(99.0));
+        assert_eq!(cfg.scale, 1.5);
+        assert!(cfg.always_on_top);
+
+        // Subsequent partial patch leaves untouched fields alone.
+        let patch2 = PetWindowStatePatch {
+            x: None,
+            y: None,
+            scale: Some(2.0),
+            always_on_top: None,
+            enabled: None,
+        };
+        let cfg2 = pet_save_window_state_core(&db.conn, patch2)
+            .await
+            .expect("save 2");
+        assert_eq!(cfg2.x, Some(42.0), "x preserved");
+        assert_eq!(cfg2.scale, 2.0);
+    }
+
+    #[tokio::test]
+    async fn pet_save_window_state_clamps_scale_to_valid_range() {
+        let db = fresh_in_memory_db().await;
+        let patch_too_large = PetWindowStatePatch {
+            x: None,
+            y: None,
+            scale: Some(10.0),
+            always_on_top: None,
+            enabled: None,
+        };
+        let cfg = pet_save_window_state_core(&db.conn, patch_too_large)
+            .await
+            .expect("save");
+        assert_eq!(cfg.scale, 3.0, "scale clamped to upper bound");
+
+        let patch_too_small = PetWindowStatePatch {
+            x: None,
+            y: None,
+            scale: Some(0.1),
+            always_on_top: None,
+            enabled: None,
+        };
+        let cfg2 = pet_save_window_state_core(&db.conn, patch_too_small)
+            .await
+            .expect("save 2");
+        assert_eq!(cfg2.scale, 0.5, "scale clamped to lower bound");
+    }
+}

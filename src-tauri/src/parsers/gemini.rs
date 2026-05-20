@@ -19,8 +19,10 @@ impl GeminiParser {
         Self { base_dir }
     }
 
-    #[cfg(test)]
-    fn with_base_dir(base_dir: PathBuf) -> Self {
+    /// Test-only constructor that lets callers point the parser at a fixture
+    /// directory instead of `~/.gemini`.
+    #[doc(hidden)]
+    pub fn with_base_dir(base_dir: PathBuf) -> Self {
         Self { base_dir }
     }
 

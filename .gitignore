@@ -32,6 +32,11 @@ public/vs
 *.sln
 *.sw?
 
+# Test artifacts
+coverage/
+*.snap.new
+.vitest-cache/
+
 # Agent
 .claude
 .docs

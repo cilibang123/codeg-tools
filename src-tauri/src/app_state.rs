@@ -43,3 +43,40 @@ pub fn default_terminal_manager() -> TerminalManager {
 pub fn default_chat_channel_manager() -> ChatChannelManager {
     ChatChannelManager::new()
 }
+
+impl AppState {
+    /// Test-only constructor: build an `AppState` wired to an in-memory
+    /// database and a `WebOnly` event emitter. Suitable for axum-test driven
+    /// HTTP integration tests where no Tauri runtime is available.
+    ///
+    /// `data_dir` is a temp directory; handlers that touch it must use
+    /// `tempfile::tempdir()` and pass the resulting path in.
+    #[doc(hidden)]
+    pub fn new_for_test(db: crate::db::AppDatabase, data_dir: PathBuf) -> Self {
+        use crate::acp::{EventBusMetrics, InternalEventBus};
+        use crate::web::event_bridge::WebEventBroadcaster;
+
+        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let metrics = Arc::new(EventBusMetrics::default());
+        let acp_event_bus = Arc::new(InternalEventBus::new(metrics));
+        let emitter = EventEmitter::web_only(broadcaster.clone(), acp_event_bus.clone());
+
+        Self {
+            db,
+            connection_manager: default_connection_manager(),
+            terminal_manager: default_terminal_manager(),
+            event_broadcaster: broadcaster,
+            acp_event_bus,
+            emitter,
+            data_dir,
+            web_server_state: crate::web::WebServerState::new(),
+            chat_channel_manager: default_chat_channel_manager(),
+            workspace_transfer: Arc::new(
+                crate::workspace_transfer::WorkspaceTransferManager::new_for_tests(
+                    std::time::Duration::from_secs(60),
+                ),
+            ),
+            pet_state: crate::pet_state_mapper::new_pet_state_handle(),
+        }
+    }
+}

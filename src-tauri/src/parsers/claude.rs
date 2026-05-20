@@ -229,6 +229,13 @@ impl ClaudeParser {
         Self { base_dir }
     }
 
+    /// Test-only constructor that lets callers point the parser at a fixture
+    /// directory instead of `~/.claude/projects`.
+    #[doc(hidden)]
+    pub fn with_base_dir(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+
     fn decode_folder_path(encoded: &str) -> String {
         encoded.replace('-', "/")
     }

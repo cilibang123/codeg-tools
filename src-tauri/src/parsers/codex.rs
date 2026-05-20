@@ -21,6 +21,13 @@ impl CodexParser {
         Self { base_dir }
     }
 
+    /// Test-only constructor that lets callers point the parser at a fixture
+    /// directory instead of `~/.codex/sessions`.
+    #[doc(hidden)]
+    pub fn with_base_dir(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+
     fn parse_jsonl_summary(
         &self,
         path: &PathBuf,
