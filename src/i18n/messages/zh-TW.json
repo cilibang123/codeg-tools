@@ -1867,7 +1867,12 @@
             "spawn_failed": "啟動失敗",
             "send_failed": "傳送失敗",
             "timeout": "逾時",
-            "canceled": "已取消"
+            "canceled": "已取消",
+            "child_refusal": "子代理拒絕",
+            "child_max_tokens": "子代理超出 token 上限",
+            "child_max_turn_requests": "子代理超出請求上限",
+            "child_empty": "子代理無回應",
+            "child_unknown": "子代理未知錯誤"
           }
         }
       },

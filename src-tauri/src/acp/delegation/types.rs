@@ -65,6 +65,20 @@ pub enum DelegationError {
     SpawnFailed(String),
     #[error("subagent runtime error: {0}")]
     SubagentRuntimeError(String),
+    /// Child agent ended its turn via `refusal`. Often a backend / gateway
+    /// error masquerading as a refusal per the ACP spec gap.
+    #[error("subagent refused to continue")]
+    ChildRefusal,
+    #[error("subagent reached max token budget")]
+    ChildMaxTokens,
+    #[error("subagent reached max turn request budget")]
+    ChildMaxTurnRequests,
+    /// Child reported `end_turn` without producing any output (synthesized
+    /// as `empty` by the connection loop's "silent EndTurn" guard).
+    #[error("subagent produced no output")]
+    ChildEmpty,
+    #[error("subagent ended with unrecognized stop reason: {0}")]
+    ChildUnknown(String),
     #[error("timeout after {elapsed_ms}ms")]
     Timeout { elapsed_ms: u64 },
     #[error("canceled: {reason}")]
@@ -100,6 +114,11 @@ impl DelegationOutcome {
             DelegationError::InvalidWorkingDir(_) => "invalid_working_dir",
             DelegationError::SpawnFailed(_) => "spawn_failed",
             DelegationError::SubagentRuntimeError(_) => "subagent_error",
+            DelegationError::ChildRefusal => "child_refusal",
+            DelegationError::ChildMaxTokens => "child_max_tokens",
+            DelegationError::ChildMaxTurnRequests => "child_max_turn_requests",
+            DelegationError::ChildEmpty => "child_empty",
+            DelegationError::ChildUnknown(_) => "child_unknown",
             DelegationError::Timeout { .. } => "timeout",
             DelegationError::Canceled { .. } => "canceled",
             DelegationError::ParentSessionGone => "canceled",

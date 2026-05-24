@@ -252,9 +252,6 @@ pub(crate) async fn handle_event(
                     cid,
                     stop_reason.as_str(),
                     last_text,
-                    &state_arc,
-                    &emitter,
-                    &envelope.connection_id,
                 )
                 .await;
             }
@@ -274,16 +271,12 @@ pub(crate) async fn handle_event(
 /// paths (`timeout` / `cancel_by_child_connection` / `cancel_by_parent`)
 /// also surface the event — see
 /// `.docs/issues/2026-05-24-delegation-termination-cascade.md`.
-#[allow(clippy::too_many_arguments)]
 async fn forward_turn_complete_to_broker(
     db_conn: &DatabaseConnection,
     broker: &DelegationBroker,
     conversation_id: i32,
     stop_reason: &str,
     last_text: Option<String>,
-    _state_arc: &Arc<RwLock<SessionState>>,
-    _emitter: &EventEmitter,
-    _child_connection_id: &str,
 ) {
     let row = match conversation_service::get_by_id(db_conn, conversation_id).await {
         Ok(r) => r,
@@ -322,8 +315,28 @@ async fn forward_turn_complete_to_broker(
             },
             Some(conversation_id),
         ),
+        // Each child turn-failure reason gets a distinct wire code so the
+        // parent UI can show a more useful error label than a generic
+        // "subagent error". Mirrors the parent's own
+        // `turn_failure_error_event` mapping in `connection.rs`.
+        "refusal" => DelegationOutcome::from_err(
+            DelegationError::ChildRefusal,
+            Some(conversation_id),
+        ),
+        "max_tokens" => DelegationOutcome::from_err(
+            DelegationError::ChildMaxTokens,
+            Some(conversation_id),
+        ),
+        "max_turn_requests" => DelegationOutcome::from_err(
+            DelegationError::ChildMaxTurnRequests,
+            Some(conversation_id),
+        ),
+        "empty" => DelegationOutcome::from_err(
+            DelegationError::ChildEmpty,
+            Some(conversation_id),
+        ),
         other => DelegationOutcome::from_err(
-            DelegationError::SubagentRuntimeError(format!("stop_reason: {other}")),
+            DelegationError::ChildUnknown(other.to_string()),
             Some(conversation_id),
         ),
     };

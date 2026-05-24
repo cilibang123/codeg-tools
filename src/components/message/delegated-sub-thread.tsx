@@ -774,6 +774,16 @@ function ErrorLabel({ code }: { code?: string }) {
       return <>{t("timeout")}</>
     case "canceled":
       return <>{t("canceled")}</>
+    case "child_refusal":
+      return <>{t("child_refusal")}</>
+    case "child_max_tokens":
+      return <>{t("child_max_tokens")}</>
+    case "child_max_turn_requests":
+      return <>{t("child_max_turn_requests")}</>
+    case "child_empty":
+      return <>{t("child_empty")}</>
+    case "child_unknown":
+      return <>{t("child_unknown")}</>
     default:
       return <>{t("default")}</>
   }
