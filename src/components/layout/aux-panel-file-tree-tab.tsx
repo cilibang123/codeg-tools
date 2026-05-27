@@ -870,6 +870,7 @@ export function FileTreeTab() {
     reloadOpenFileBackground,
     applyExternalReload,
     markTabsStale,
+    rejectFileTab,
   } = useWorkspaceContext()
   const workspaceState = useWorkspaceStateStore(folder?.path ?? null)
   const [nodes, setNodes] = useState<FileTreeNode[]>([])
@@ -2143,6 +2144,7 @@ export function FileTreeTab() {
         unsavedContent: string
         signature: string
       }
+    | { kind: "missing"; path: string; error: string }
 
   // Per-tab disk-vs-buffer resolver. Compares the tab's known etag against
   // the latest disk read for the same path. Independent of activation —
@@ -2178,11 +2180,15 @@ export function FileTreeTab() {
       let latest: FileEditContent
       try {
         latest = await readFileForEdit(rootPath, path)
-      } catch {
-        // Disk read failed (permissions, deleted, locked, …). Stay quiet
-        // and let the next workspace event retry. We do NOT mark stale or
-        // trigger a reload — there is nothing fresh to apply.
-        return { kind: "none" }
+      } catch (error) {
+        // Disk read failed — most commonly an external delete, but also
+        // permission revocation, an exclusive lock, or a transient FS
+        // error. Surface this as its own decision: the watcher routes it
+        // to rejectFileTab (clean) or markTabsStale (dirty) so the user
+        // is never silently shown a buffer that no longer matches disk.
+        const latestTab = stillSameTab()
+        if (!latestTab) return { kind: "none" }
+        return { kind: "missing", path, error: toErrorMessage(error) }
       }
 
       const latestTab = stillSameTab()
@@ -2312,6 +2318,23 @@ export function FileTreeTab() {
           continue
         }
 
+        if (decision.kind === "missing") {
+          // Disk read failed on a path that an envelope flagged as
+          // changed — the file is gone, locked, or otherwise unreadable.
+          // Clean tab: reject to error state so the user is never shown a
+          // stale buffer that no longer corresponds to disk. Dirty tab:
+          // mark stale to preserve unsaved edits; the next save attempt
+          // (or activation transition) surfaces the failure.
+          externalConflictSignatureByPathRef.current.delete(decision.path)
+          const liveTab = fileTabsRef.current.find((t) => t.id === tab.id)
+          if (liveTab?.isDirty) {
+            markTabsStale(decision.path)
+          } else {
+            rejectFileTab(decision.path, decision.error)
+          }
+          continue
+        }
+
         if (isActive) {
           announceConflict(decision)
         } else {
@@ -2379,6 +2402,7 @@ export function FileTreeTab() {
     applyExternalReload,
     reloadOpenFileBackground,
     markTabsStale,
+    rejectFileTab,
     announceConflict,
   ])
 
@@ -2405,6 +2429,13 @@ export function FileTreeTab() {
         announceConflict(decision)
       } else if (decision.kind === "reload") {
         void applyExternalReload(decision.path, decision.latest)
+      } else if (decision.kind === "missing") {
+        // File vanished while the dirty buffer sat in a non-active tab.
+        // The buffer is still dirty here (this branch only runs for
+        // tab.isDirty === true) so we keep markTabsStale on the path —
+        // refusing to silently lose the user's unsaved edits. The user
+        // discovers the deletion on save (backend recreates or errors).
+        markTabsStale(decision.path)
       }
     })()
   }, [
@@ -2413,6 +2444,7 @@ export function FileTreeTab() {
     applyExternalReload,
     resolveFileChangeDecision,
     announceConflict,
+    markTabsStale,
   ])
 
   if (!folder) {

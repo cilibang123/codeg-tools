@@ -92,6 +92,14 @@ interface WorkspaceContextValue {
   // Flip stale=true on the tab matching `path`. Activating a stale tab
   // forces a refetch (clean) or triggers conflict resolution (dirty).
   markTabsStale: (path: string) => void
+  // Mark a clean open tab as load-failed, replacing its body with the
+  // supplied error message and routing it into the editor's error state.
+  // No-op when no tab matches OR when the tab is dirty — unsaved edits
+  // must never be silently clobbered. Used by the watcher when a workspace
+  // event reports a path whose disk read fails (external delete, locked,
+  // permission revoked, …), so the user is never shown a stale buffer that
+  // no longer corresponds to disk.
+  rejectFileTab: (path: string, errorMessage: string) => void
   pendingFileReveal: {
     requestId: number
     path: string
@@ -684,9 +692,15 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
   // detection watcher uses this after its resolver has already read the
   // latest disk content — without this we would re-read every file twice
   // per workspace event (resolver + reload). Dirty tabs are skipped so
-  // unsaved edits are never silently clobbered. Generation/settle is used
-  // so this write never resurrects a closed tab and concurrent applies
-  // converge to the latest payload.
+  // unsaved edits are never silently clobbered.
+  //
+  // Concurrency contract: the in-flight marker is bumped to invalidate any
+  // concurrent openFilePreview's pending settle (so an older read cannot
+  // overwrite our newer payload) and is then settled IMMEDIATELY after the
+  // synchronous content write. The slow, cosmetic git-base refresh runs
+  // out-of-band — it does NOT extend the in-flight marker's lifetime —
+  // so a stuck git invocation cannot block a subsequent user-initiated
+  // reload via the openFilePreview dedup path.
   const applyExternalReload = useCallback(
     async (rawPath: string, fetched: FileEditContent) => {
       if (!folderPath) return
@@ -698,9 +712,7 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
 
       const gen = beginFetchGeneration(tabId)
 
-      // Write content synchronously from the prefetched payload. No
-      // settleFetch guard here: the inFlightLoadsRef bump above already
-      // invalidates any concurrent fetch's resolve.
+      // Synchronous canonical write from the prefetched payload.
       setFileTabs((prev) =>
         prev.map((tab) =>
           tab.id === tabId
@@ -722,25 +734,77 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
         )
       )
 
-      // Refresh git base in the background. If the tab is closed or a
-      // newer apply/reload supersedes us before this settles, the
-      // settleFetch guard ensures we do not write stale gitBaseContent.
-      try {
-        const tracked = await gitIsTracked(folderPath, path).catch(() => false)
-        const gitBaseContent = tracked
-          ? await gitShowFile(folderPath, path).catch(() => "")
-          : undefined
-        if (!settleFetch(tabId, gen)) return
-        setFileTabs((prev) =>
-          prev.map((tab) =>
-            tab.id === tabId ? { ...tab, gitBaseContent } : tab
+      // Release the in-flight marker NOW. Two-stage invalidation: the
+      // beginFetchGeneration above already poisoned any concurrent
+      // openFilePreview fetch (its settleFetch will fail), so clearing
+      // here cannot resurrect an in-flight overwrite. The cosmetic git
+      // base refresh below is decoupled — slow git must not block user
+      // reload dedup. (Each call's settle is mutually exclusive: the
+      // last applyExternalReload's gen wins, prior gens are stale.)
+      settleFetch(tabId, gen)
+
+      // Fire-and-forget git base refresh: bounded by a hard timeout so a
+      // stuck git invocation cannot leak resources, and gated by tab
+      // existence at settle time so we never write into a closed tab.
+      void (async () => {
+        try {
+          const gitBaseContent = await withTimeout(
+            (async () => {
+              const tracked = await gitIsTracked(folderPath, path).catch(
+                () => false
+              )
+              if (!tracked) return undefined
+              return gitShowFile(folderPath, path).catch(() => "")
+            })(),
+            15_000,
+            t("previewRequestTimedOut")
           )
-        )
-      } catch {
-        settleFetch(tabId, gen)
-      }
+          if (!fileTabsRef.current.find((tab) => tab.id === tabId)) return
+          setFileTabs((prev) =>
+            prev.map((tab) =>
+              tab.id === tabId ? { ...tab, gitBaseContent } : tab
+            )
+          )
+        } catch {
+          // Timeout or unexpected failure: leave existing gitBaseContent.
+        }
+      })()
     },
-    [folderPath, beginFetchGeneration, settleFetch]
+    [folderPath, beginFetchGeneration, settleFetch, t]
+  )
+
+  // Mark a clean open tab as load-failed. Used by the change-detection
+  // watcher when a readFileForEdit on a changed path fails (most commonly
+  // external delete). Dirty tabs are deliberately not touched here — the
+  // watcher routes them to markTabsStale so unsaved edits are preserved.
+  const rejectFileTab = useCallback(
+    (rawPath: string, errorMessage: string) => {
+      const path = normalizePath(rawPath)
+      const tabId = `file:${path}`
+      const existing = fileTabsRef.current.find((t) => t.id === tabId)
+      if (!existing || existing.kind !== "file") return
+      if (existing.isDirty) return
+
+      // Bump generation so any concurrent fetch's settle is invalidated
+      // and cannot overwrite the error message we are about to write.
+      const gen = beginFetchGeneration(tabId)
+      setFileTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === tabId
+            ? {
+                ...tab,
+                content: t("unableLoadContent", { message: errorMessage }),
+                loading: false,
+                stale: false,
+                saveState: "error",
+                saveError: errorMessage,
+              }
+            : tab
+        )
+      )
+      settleFetch(tabId, gen)
+    },
+    [beginFetchGeneration, settleFetch, t]
   )
 
   const openFilePreview = useCallback(
@@ -1513,6 +1577,7 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
       reloadOpenFileBackground,
       applyExternalReload,
       markTabsStale,
+      rejectFileTab,
       pendingFileReveal,
       consumePendingFileReveal,
       openWorkingTreeDiff,
@@ -1547,6 +1612,7 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
       reloadOpenFileBackground,
       applyExternalReload,
       markTabsStale,
+      rejectFileTab,
       pendingFileReveal,
       consumePendingFileReveal,
       openWorkingTreeDiff,

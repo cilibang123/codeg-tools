@@ -87,4 +87,20 @@ describe("aux-panel-file-tree-tab external-change watcher coverage", () => {
     // full sweep, or external changes can be missed silently.
     expect(source).toMatch(/resync_hint/)
   })
+
+  it("models a missing/read-failure decision in the resolver", () => {
+    // Silent stale content after an external delete is unacceptable. The
+    // resolver MUST surface read failure as its own decision kind so the
+    // watcher can branch into reject (clean) or mark-stale (dirty),
+    // instead of collapsing the catch into { kind: "none" }.
+    expect(source).toMatch(/kind:\s*"missing"/)
+  })
+
+  it("dispatches rejectFileTab from the change watcher for missing decisions", () => {
+    // The watcher must route the missing decision into a user-visible
+    // error path for clean tabs. markTabsStale alone covers the dirty
+    // case; rejectFileTab is required for the clean case so the buffer
+    // is not silently preserved against a now-deleted disk file.
+    expect(source).toMatch(/\brejectFileTab\b/)
+  })
 })

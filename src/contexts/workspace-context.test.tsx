@@ -1110,3 +1110,256 @@ describe("applyExternalReload prefetched-write semantics", () => {
     expect(mockedApi.readFileForEdit).not.toHaveBeenCalled()
   })
 })
+
+interface RejectFileTabSnapshot {
+  activeId: string | null
+  tabs: Array<{
+    id: string
+    content: string
+    isDirty: boolean
+    saveState?: string
+    saveError?: string | null
+    loading: boolean
+  }>
+}
+
+function RejectFileTabProbe({
+  onCapture,
+}: {
+  onCapture: (snapshot: RejectFileTabSnapshot) => void
+}) {
+  const {
+    openFilePreview,
+    fileTabs,
+    activeFileTabId,
+    rejectFileTab,
+    updateActiveFileContent,
+  } = useWorkspaceContext()
+  onCapture({
+    activeId: activeFileTabId,
+    tabs: fileTabs.map((tab) => ({
+      id: tab.id,
+      content: tab.content,
+      isDirty: Boolean(tab.isDirty),
+      saveState: tab.saveState,
+      saveError: tab.saveError ?? null,
+      loading: tab.loading,
+    })),
+  })
+  return (
+    <div>
+      <button onClick={() => void openFilePreview("a.ts")}>open-a</button>
+      <button onClick={() => updateActiveFileContent("dirty-local")}>
+        edit
+      </button>
+      <button onClick={() => rejectFileTab("a.ts", "ENOENT: file removed")}>
+        reject-a
+      </button>
+      <button onClick={() => rejectFileTab("missing.ts", "irrelevant")}>
+        reject-missing
+      </button>
+    </div>
+  )
+}
+
+describe("rejectFileTab missing-on-disk semantics", () => {
+  beforeEach(() => {
+    mockedApi.readFileForEdit.mockReset()
+    mockedApi.gitIsTracked.mockReset()
+    mockedApi.gitShowFile.mockReset()
+    mockedApi.gitIsTracked.mockResolvedValue(false)
+  })
+
+  it("replaces a clean tab's content with the supplied error and marks it errored", async () => {
+    mockedApi.readFileForEdit.mockResolvedValueOnce({
+      path: "a.ts",
+      content: "fresh",
+      etag: "ea1",
+      mtime_ms: 1,
+      readonly: false,
+      line_ending: "lf",
+    })
+
+    let snap: RejectFileTabSnapshot = { activeId: null, tabs: [] }
+    render(
+      <WorkspaceProvider>
+        <RejectFileTabProbe onCapture={(s) => (snap = s)} />
+      </WorkspaceProvider>
+    )
+
+    await act(async () => {
+      screen.getByText("open-a").click()
+    })
+    expect(snap.tabs[0]?.content).toBe("fresh")
+
+    await act(async () => {
+      screen.getByText("reject-a").click()
+    })
+
+    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    expect(tabA?.saveState).toBe("error")
+    expect(tabA?.saveError).toBe("ENOENT: file removed")
+    expect(tabA?.loading).toBe(false)
+    // Original content should no longer be presented as the file's body —
+    // an error message stands in its place so the user is never silently
+    // shown a buffer that no longer matches disk.
+    expect(tabA?.content).not.toBe("fresh")
+    expect(tabA?.content.length).toBeGreaterThan(0)
+  })
+
+  it("refuses to touch a dirty tab so unsaved edits survive an external delete", async () => {
+    mockedApi.readFileForEdit.mockResolvedValueOnce({
+      path: "a.ts",
+      content: "v1",
+      etag: "ea1",
+      mtime_ms: 1,
+      readonly: false,
+      line_ending: "lf",
+    })
+
+    let snap: RejectFileTabSnapshot = { activeId: null, tabs: [] }
+    render(
+      <WorkspaceProvider>
+        <RejectFileTabProbe onCapture={(s) => (snap = s)} />
+      </WorkspaceProvider>
+    )
+
+    await act(async () => {
+      screen.getByText("open-a").click()
+    })
+    await act(async () => {
+      screen.getByText("edit").click()
+    })
+    expect(snap.tabs[0]?.isDirty).toBe(true)
+    expect(snap.tabs[0]?.content).toBe("dirty-local")
+
+    await act(async () => {
+      screen.getByText("reject-a").click()
+    })
+
+    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    expect(tabA?.isDirty).toBe(true)
+    expect(tabA?.content).toBe("dirty-local")
+    // saveError stays null — only the watcher's markTabsStale path is
+    // responsible for surfacing the read failure to the user when the
+    // buffer is dirty.
+    expect(tabA?.saveError).toBeNull()
+  })
+
+  it("is a no-op when the path has no open tab", async () => {
+    let snap: RejectFileTabSnapshot = { activeId: null, tabs: [] }
+    render(
+      <WorkspaceProvider>
+        <RejectFileTabProbe onCapture={(s) => (snap = s)} />
+      </WorkspaceProvider>
+    )
+
+    await act(async () => {
+      screen.getByText("reject-missing").click()
+    })
+
+    expect(snap.tabs).toHaveLength(0)
+  })
+})
+
+interface GitHangProbeSnapshot {
+  tabs: Array<{ id: string; content: string }>
+}
+
+function ApplyThenReloadProbe({
+  onCapture,
+}: {
+  onCapture: (snapshot: GitHangProbeSnapshot) => void
+}) {
+  const { openFilePreview, fileTabs, applyExternalReload } =
+    useWorkspaceContext()
+  onCapture({
+    tabs: fileTabs.map((tab) => ({ id: tab.id, content: tab.content })),
+  })
+  return (
+    <div>
+      <button onClick={() => void openFilePreview("a.ts")}>open-a</button>
+      <button
+        onClick={() =>
+          void applyExternalReload("a.ts", {
+            path: "a.ts",
+            content: "ext-content",
+            etag: "ext-etag",
+            mtime_ms: 99,
+            readonly: false,
+            line_ending: "lf",
+          })
+        }
+      >
+        apply-a
+      </button>
+      <button onClick={() => void openFilePreview("a.ts", { reload: true })}>
+        reload-a
+      </button>
+    </div>
+  )
+}
+
+describe("applyExternalReload does not block subsequent reloads on slow git base", () => {
+  beforeEach(() => {
+    mockedApi.readFileForEdit.mockReset()
+    mockedApi.gitIsTracked.mockReset()
+    mockedApi.gitShowFile.mockReset()
+  })
+
+  it("releases the in-flight marker before awaiting git base so a foreground reload still fires", async () => {
+    // First open: git not tracked → no gitShowFile.
+    mockedApi.gitIsTracked.mockResolvedValueOnce(false)
+    mockedApi.readFileForEdit
+      .mockResolvedValueOnce({
+        path: "a.ts",
+        content: "v1",
+        etag: "e1",
+        mtime_ms: 1,
+        readonly: false,
+        line_ending: "lf",
+      })
+      .mockResolvedValueOnce({
+        path: "a.ts",
+        content: "v3",
+        etag: "e3",
+        mtime_ms: 3,
+        readonly: false,
+        line_ending: "lf",
+      })
+
+    let snap: GitHangProbeSnapshot = { tabs: [] }
+    render(
+      <WorkspaceProvider>
+        <ApplyThenReloadProbe onCapture={(s) => (snap = s)} />
+      </WorkspaceProvider>
+    )
+
+    await act(async () => {
+      screen.getByText("open-a").click()
+    })
+    expect(mockedApi.readFileForEdit).toHaveBeenCalledTimes(1)
+
+    // Now simulate a stuck git: subsequent gitIsTracked/gitShowFile hang
+    // forever. applyExternalReload's git base refresh must not block
+    // user-initiated reload via the inFlightLoadsRef dedup path.
+    mockedApi.gitIsTracked.mockImplementation(() => new Promise(() => {}))
+    mockedApi.gitShowFile.mockImplementation(() => new Promise(() => {}))
+
+    await act(async () => {
+      screen.getByText("apply-a").click()
+    })
+    // Content was written from the prefetched payload despite hung git.
+    expect(snap.tabs.find((t) => t.id === "file:a.ts")?.content).toBe(
+      "ext-content"
+    )
+
+    // Foreground reload — must fire a second readFileForEdit, not be
+    // deduplicated by a lingering in-flight marker from applyExternalReload.
+    await act(async () => {
+      screen.getByText("reload-a").click()
+    })
+
+    expect(mockedApi.readFileForEdit).toHaveBeenCalledTimes(2)
+  })
+})
