@@ -667,6 +667,7 @@ pub(crate) async fn do_start_web_server_tauri(
             .state::<crate::commands::delegation::DelegationSocketPath>()
             .0
             .clone(),
+        system_op_lock: crate::app_state::default_system_op_lock(),
     });
 
     // See do_start_web_server_with_state for rationale on the reset.

@@ -132,6 +132,11 @@
     "checkUpdateFailed": "Update-Prüfung fehlgeschlagen: {message}",
     "installSuccess": "Update installiert. App wird neu gestartet.",
     "installFailed": "Update fehlgeschlagen: {message}",
+    "upgradeSuccess": "Aktualisierung abgeschlossen. Wird neu geladen...",
+    "restartTimeout": "Der Server ist nicht rechtzeitig zurückgekehrt. Prüfe die Container- oder Dienstprotokolle.",
+    "restartingIn": "Neustart in {seconds} s...",
+    "waitingForServer": "Warten, bis der Server zurückkehrt...",
+    "dockerUpgradeHint": "Dies aktualisiert den laufenden Container. Damit es nach dem Neuerstellen des Containers erhalten bleibt, führe auch docker compose pull aus.",
     "updateErrors": {
       "sourceUnavailable": "Die Update-Quelle ist nicht erreichbar. Prüfe Netzwerk oder Proxy und versuche es erneut.",
       "network": "Netzwerkverbindung fehlgeschlagen. Prüfe Netzwerk oder Proxy und versuche es erneut.",

@@ -132,6 +132,11 @@
     "checkUpdateFailed": "업데이트 확인 실패: {message}",
     "installSuccess": "업데이트가 설치되었습니다. 앱을 다시 시작합니다.",
     "installFailed": "업데이트 실패: {message}",
+    "upgradeSuccess": "업그레이드가 완료되었습니다. 다시 불러오는 중...",
+    "restartTimeout": "서버가 제때 복구되지 않았습니다. 컨테이너 또는 서비스 로그를 확인하세요.",
+    "restartingIn": "{seconds}초 후에 다시 시작합니다...",
+    "waitingForServer": "서버가 복구되기를 기다리는 중...",
+    "dockerUpgradeHint": "실행 중인 컨테이너를 업그레이드합니다. 컨테이너 재생성 후에도 유지하려면 docker compose pull도 실행하세요.",
     "updateErrors": {
       "sourceUnavailable": "업데이트 소스에 연결할 수 없습니다. 네트워크 또는 프록시를 확인한 뒤 다시 시도하세요.",
       "network": "네트워크 연결에 실패했습니다. 네트워크 또는 프록시를 확인한 뒤 다시 시도하세요.",

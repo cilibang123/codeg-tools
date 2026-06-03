@@ -39,9 +39,13 @@ import {
   getCurrentAppVersion,
   installAppUpdate,
   normalizeAppUpdateError,
+  performServerUpdate,
   relaunchApp,
+  restartServer,
+  subscribeServerUpdateProgress,
+  waitForServerHealthy,
 } from "@/lib/updater"
-import type { DownloadEvent } from "@/lib/updater"
+import type { DownloadEvent, ServerUpdateProgress } from "@/lib/updater"
 import { APP_LOCALES } from "@/lib/i18n"
 import { toErrorMessage } from "@/lib/app-error"
 
@@ -102,6 +106,17 @@ export function SystemNetworkSettings() {
     total: number | null
     phase: "downloading" | "installing"
   } | null>(null)
+  // Server/Docker self-update capability reported by `check_app_update`
+  // (absent in desktop mode). Drives whether the upgrade button performs a
+  // real in-place update or just links to the release page.
+  const [serverSelfUpdate, setServerSelfUpdate] = useState(false)
+  const [serverRuntime, setServerRuntime] = useState<string | undefined>(
+    undefined
+  )
+  const [restartDelayMs, setRestartDelayMs] = useState(2000)
+  // Non-null while the server is restarting after an upgrade: the seconds
+  // remaining on the countdown before we start polling /health.
+  const [restartCountdown, setRestartCountdown] = useState<number | null>(null)
 
   const [appLanguage, setAppLanguage] = useState<LanguageSelectValue>(
     languageSettings.mode === "system" ? "system" : languageSettings.language
@@ -280,6 +295,14 @@ export function SystemNetworkSettings() {
       setCurrentVersion(result.currentVersion)
       setLastCheckedAt(new Date())
 
+      // Server-mode capability (undefined in desktop, where Tauri's updater
+      // handles installs and these fields aren't present).
+      setServerSelfUpdate(result.selfUpdateSupported ?? false)
+      setServerRuntime(result.runtime)
+      if (typeof result.restartDelayMs === "number") {
+        setRestartDelayMs(result.restartDelayMs)
+      }
+
       if (result.update) {
         setAvailableUpdate(result.update)
       } else {
@@ -347,6 +370,73 @@ export function SystemNetworkSettings() {
       setDownloadProgress(null)
     }
   }, [availableUpdate, formatUpdateError, t])
+
+  // Server / Docker in-place upgrade: download+verify+swap on the server,
+  // ask it to restart, then count down and poll /health before reloading.
+  const runServerUpgrade = useCallback(async () => {
+    if (!availableUpdate) return
+
+    setInstallingUpdate(true)
+    setUpdateError(null)
+    setDownloadProgress(null)
+    setRestartCountdown(null)
+
+    let unsubscribe: (() => void) | undefined
+    try {
+      unsubscribe = await subscribeServerUpdateProgress(
+        (p: ServerUpdateProgress) => {
+          setDownloadProgress({
+            downloaded: p.downloaded,
+            total: p.total,
+            phase: p.phase === "downloading" ? "downloading" : "installing",
+          })
+        }
+      )
+
+      const result = await performServerUpdate()
+      setDownloadProgress(null)
+
+      // Trigger the relaunch; the server responds before it exits/re-execs.
+      await restartServer()
+      const delayMs = result.restartDelayMs || restartDelayMs
+
+      // Phase 1: visible countdown over the configured relaunch delay.
+      const totalWaitMs = delayMs + 1000
+      const start = Date.now()
+      await new Promise<void>((resolve) => {
+        const tick = () => {
+          const remaining = Math.max(0, totalWaitMs - (Date.now() - start))
+          setRestartCountdown(Math.ceil(remaining / 1000))
+          if (remaining <= 0) resolve()
+          else setTimeout(tick, 250)
+        }
+        tick()
+      })
+
+      // Phase 2: poll until the new process answers (or give up).
+      const healthy = await waitForServerHealthy({
+        timeoutMs: 90_000,
+        intervalMs: 1500,
+      })
+      if (healthy) {
+        toast.success(t("upgradeSuccess"))
+        window.location.reload()
+      } else {
+        setUpdateError(t("restartTimeout"))
+        toast.error(t("restartTimeout"))
+      }
+    } catch (err) {
+      const message = formatUpdateError(err, "install")
+      setUpdateError(message)
+      toast.error(t("installFailed", { message }))
+      console.error("[Settings] server upgrade failed:", err)
+    } finally {
+      unsubscribe?.()
+      setInstallingUpdate(false)
+      setDownloadProgress(null)
+      setRestartCountdown(null)
+    }
+  }, [availableUpdate, formatUpdateError, restartDelayMs, t])
 
   if (loading) {
     return (
@@ -430,6 +520,24 @@ export function SystemNetworkSettings() {
                       </>
                     )}
                   </Button>
+                ) : serverSelfUpdate ? (
+                  <Button
+                    size="sm"
+                    onClick={runServerUpgrade}
+                    disabled={installingUpdate}
+                  >
+                    {installingUpdate ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        {t("updating")}
+                      </>
+                    ) : (
+                      <>
+                        <ArrowUpCircle className="h-3.5 w-3.5" />
+                        {t("upgradeTo", { version: availableUpdate.version })}
+                      </>
+                    )}
+                  </Button>
                 ) : (
                   <Button
                     size="sm"
@@ -495,6 +603,23 @@ export function SystemNetworkSettings() {
                 </div>
               </div>
             )}
+
+            {restartCountdown !== null && (
+              <p className="flex items-center gap-2 text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {restartCountdown > 0
+                  ? t("restartingIn", { seconds: restartCountdown })
+                  : t("waitingForServer")}
+              </p>
+            )}
+
+            {availableUpdate &&
+              serverSelfUpdate &&
+              serverRuntime === "docker" && (
+                <p className="text-muted-foreground/80 text-[11px] leading-5">
+                  {t("dockerUpgradeHint")}
+                </p>
+              )}
 
             {availableUpdate && (
               <div className="space-y-2 pt-2 border-t border-border/70">

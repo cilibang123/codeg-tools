@@ -8,11 +8,23 @@ use codeg_lib::web::{
 };
 
 fn main() {
+    // Capture our own executable path before anything can rename it (an
+    // in-place upgrade swaps the binary mid-run; `current_exe()` would then
+    // resolve to a `" (deleted)"` path on Linux). Cheap, single-shot.
+    codeg_lib::update::runtime::prime_self_exe();
+
     // Support --version flag
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("{}", env!("CARGO_PKG_VERSION"));
         return;
+    }
+
+    // `--supervise`: run as the process supervisor that owns the worker's
+    // lifecycle (PID 1 in Docker). It spawns `codeg-server` without this
+    // flag and relaunches it after an in-place upgrade. Never returns.
+    if args.iter().any(|a| a == "--supervise") {
+        codeg_lib::supervise::run();
     }
 
     // When invoked as a git credential helper (by the script written via
@@ -173,6 +185,7 @@ async fn async_main() {
         delegation_broker: delegation_broker.clone(),
         delegation_tokens: delegation_tokens.clone(),
         delegation_socket_path: delegation_socket_path.clone(),
+        system_op_lock: codeg_lib::app_state::default_system_op_lock(),
     });
 
     // Apply persisted delegation settings (depth, enabled) before

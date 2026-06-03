@@ -132,6 +132,11 @@
     "checkUpdateFailed": "检查更新失败：{message}",
     "installSuccess": "升级包已安装，正在重启应用",
     "installFailed": "升级失败：{message}",
+    "upgradeSuccess": "升级完成，正在重新加载...",
+    "restartTimeout": "服务未能按时恢复，请检查容器或服务日志。",
+    "restartingIn": "将在 {seconds} 秒后重启...",
+    "waitingForServer": "正在等待服务恢复...",
+    "dockerUpgradeHint": "这将升级当前运行的容器。如需在容器重建后仍然生效，请同时执行 docker compose pull。",
     "updateErrors": {
       "sourceUnavailable": "无法连接更新源，请检查网络或代理设置后重试。",
       "network": "网络连接异常，请检查网络或代理设置后重试。",

@@ -132,6 +132,11 @@
     "checkUpdateFailed": "No se pudo buscar actualizaciones: {message}",
     "installSuccess": "Actualización instalada. Reiniciando la app.",
     "installFailed": "La actualización falló: {message}",
+    "upgradeSuccess": "Actualización completada. Recargando...",
+    "restartTimeout": "El servidor no volvió a tiempo. Revisa los registros del contenedor o del servicio.",
+    "restartingIn": "Reiniciando en {seconds} s...",
+    "waitingForServer": "Esperando a que el servidor vuelva...",
+    "dockerUpgradeHint": "Esto actualiza el contenedor en ejecución. Para mantenerlo tras recrear el contenedor, ejecuta también docker compose pull.",
     "updateErrors": {
       "sourceUnavailable": "No se puede acceder al origen de actualización. Revisa tu red o proxy e inténtalo de nuevo.",
       "network": "Falló la conexión de red. Revisa tu red o proxy e inténtalo de nuevo.",

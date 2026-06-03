@@ -132,6 +132,11 @@
     "checkUpdateFailed": "Échec de la recherche de mises à jour : {message}",
     "installSuccess": "Mise à jour installée. Redémarrage de l’app.",
     "installFailed": "Échec de la mise à jour : {message}",
+    "upgradeSuccess": "Mise à niveau terminée. Rechargement...",
+    "restartTimeout": "Le serveur n'est pas revenu à temps. Consultez les journaux du conteneur ou du service.",
+    "restartingIn": "Redémarrage dans {seconds} s...",
+    "waitingForServer": "En attente du retour du serveur...",
+    "dockerUpgradeHint": "Cela met à niveau le conteneur en cours d'exécution. Pour le conserver après la recréation du conteneur, exécutez aussi docker compose pull.",
     "updateErrors": {
       "sourceUnavailable": "Impossible d’atteindre la source de mise à jour. Vérifiez votre réseau ou proxy et réessayez.",
       "network": "La connexion réseau a échoué. Vérifiez votre réseau ou proxy et réessayez.",

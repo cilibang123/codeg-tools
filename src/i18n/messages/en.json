@@ -132,6 +132,11 @@
     "checkUpdateFailed": "Failed to check for updates: {message}",
     "installSuccess": "Update installed. Relaunching app.",
     "installFailed": "Update failed: {message}",
+    "upgradeSuccess": "Upgrade complete. Reloading...",
+    "restartTimeout": "The server didn't come back in time. Check the container or service logs.",
+    "restartingIn": "Restarting in {seconds}s...",
+    "waitingForServer": "Waiting for the server to come back...",
+    "dockerUpgradeHint": "This upgrades the running container now. To keep it after recreating the container, also run docker compose pull.",
     "updateErrors": {
       "sourceUnavailable": "Cannot reach the update source. Check your network or proxy and try again.",
       "network": "Network connection failed. Check your network or proxy and try again.",

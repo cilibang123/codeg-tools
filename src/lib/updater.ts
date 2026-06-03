@@ -10,10 +10,36 @@ export type DownloadEvent =
   | { event: "Progress"; data: { chunkLength: number } }
   | { event: "Finished" }
 
+export type ServerUpdateCapability = "supervised" | "reexec"
+
 export interface AppUpdateCheckResult {
   currentVersion: string
   update: Update | null
+  // Server-mode only (absent in desktop). Whether THIS server process can
+  // apply the update in place, how it would restart, the deployment kind,
+  // the restart delay to drive the frontend countdown, and whether a
+  // previous version is staged for rollback.
+  selfUpdateSupported?: boolean
+  capability?: ServerUpdateCapability
+  runtime?: string
+  restartDelayMs?: number
+  rollbackAvailable?: boolean
 }
+
+export interface ServerUpdateProgress {
+  phase: "downloading" | "verifying" | "extracting" | "swapping"
+  downloaded: number
+  total: number | null
+}
+
+export interface ServerUpdateActionResult {
+  version?: string
+  needRestart: boolean
+  restartDelayMs: number
+  capability: ServerUpdateCapability
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 export type AppUpdateErrorKind =
   | "source_unreachable"
@@ -65,6 +91,66 @@ export async function installAppUpdate(
 export async function relaunchApp(): Promise<void> {
   const { relaunch } = await import("@tauri-apps/plugin-process")
   await relaunch()
+}
+
+// ─── Server / Docker in-place self-update ──────────────────────────────────
+
+/** Subscribe to download/verify/swap progress emitted by the server. */
+export function subscribeServerUpdateProgress(
+  handler: (progress: ServerUpdateProgress) => void
+): Promise<() => void> {
+  return getTransport().subscribe<ServerUpdateProgress>(
+    "app_update_progress",
+    handler
+  )
+}
+
+/**
+ * Download + verify + swap the new bundle on the server. Resolves once the
+ * new files are staged on disk; the caller then triggers {@link restartServer}.
+ * Generous timeout: the download can be tens of MB.
+ */
+export async function performServerUpdate(): Promise<ServerUpdateActionResult> {
+  return getTransport().call<ServerUpdateActionResult>(
+    "perform_app_update",
+    {},
+    { timeoutMs: 15 * 60_000 }
+  )
+}
+
+/** Ask the server to relaunch into the freshly-swapped binary. */
+export async function restartServer(): Promise<ServerUpdateActionResult> {
+  return getTransport().call<ServerUpdateActionResult>("restart_app")
+}
+
+/** Revert to the previously-installed bundle (kept as `.bak`). */
+export async function rollbackServer(): Promise<ServerUpdateActionResult> {
+  return getTransport().call<ServerUpdateActionResult>("rollback_app")
+}
+
+/**
+ * Poll `/health` until the restarted server answers or the deadline passes.
+ * The WebSocket drops during restart and HTTP calls fail in the meantime —
+ * both are swallowed as "not up yet".
+ */
+export async function waitForServerHealthy(opts: {
+  timeoutMs: number
+  intervalMs?: number
+  initialDelayMs?: number
+}): Promise<boolean> {
+  const interval = opts.intervalMs ?? 1500
+  if (opts.initialDelayMs) await sleep(opts.initialDelayMs)
+  const deadline = Date.now() + opts.timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      await getTransport().call("health", {}, { timeoutMs: 4000 })
+      return true
+    } catch {
+      // Server still restarting — keep polling.
+    }
+    await sleep(interval)
+  }
+  return false
 }
 
 export async function closeAppUpdate(

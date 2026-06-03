@@ -44,6 +44,15 @@ pub struct AppState {
     /// Absolute path of the UDS / named pipe the companion connects to.
     /// PID-scoped so multiple codeg processes on the same host don't fight.
     pub delegation_socket_path: PathBuf,
+    /// Serializes mutually-exclusive system operations — in-place
+    /// self-update, restart, rollback — so a second click can't race a
+    /// download/swap already in flight. Handlers `try_lock` and reject when
+    /// held (an upgrade is already running).
+    pub system_op_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+pub fn default_system_op_lock() -> Arc<tokio::sync::Mutex<()>> {
+    Arc::new(tokio::sync::Mutex::new(()))
 }
 
 pub fn default_connection_manager() -> ConnectionManager {
@@ -157,6 +166,7 @@ impl AppState {
             delegation_broker,
             delegation_tokens,
             delegation_socket_path,
+            system_op_lock: default_system_op_lock(),
         }
     }
 }

@@ -660,6 +660,12 @@ pub fn build_router(
             "/check_app_update",
             post(handlers::web_server::check_app_update),
         )
+        .route(
+            "/perform_app_update",
+            post(handlers::app_update::perform_app_update),
+        )
+        .route("/restart_app", post(handlers::app_update::restart_app))
+        .route("/rollback_app", post(handlers::app_update::rollback_app))
         // ─── Chat Channels ───
         .route(
             "/list_chat_channels",
