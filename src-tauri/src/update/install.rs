@@ -672,6 +672,13 @@ fn replace_file(target: &Path, new_src: &Path) -> Result<(), AppCommandError> {
             let bak_tmp = PathBuf::from(bak_tmp);
             let _ = std::fs::remove_file(&bak_tmp);
             std::fs::copy(target, &bak_tmp).map_err(AppCommandError::io)?;
+            // Flush the backup's bytes before committing its name, mirroring the
+            // staged-new-file path: a power loss must not leave a `.bak` whose
+            // name is durable but whose contents are not — a later rollback
+            // would then restore that corrupt backup over a working binary.
+            std::fs::File::open(&bak_tmp)
+                .and_then(|f| f.sync_all())
+                .map_err(AppCommandError::io)?;
             std::fs::rename(&bak_tmp, &bak).map_err(AppCommandError::io)?;
         }
         if let Err(e) = std::fs::rename(&staged, target) {
