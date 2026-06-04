@@ -2310,6 +2310,8 @@
       "turnCompleteDesc": "Lorsqu'un tour d'agent se termine",
       "error": "Erreur de l'agent",
       "errorDesc": "Lorsqu'un agent rencontre une erreur",
+      "permissionRequest": "Demande d'autorisation",
+      "permissionRequestDesc": "Lorsqu'un agent demande une autorisation",
       "saved": "Filtre d'événements mis à jour.",
       "saveFailed": "Échec de l'enregistrement du filtre d'événements."
     },

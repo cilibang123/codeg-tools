@@ -2310,6 +2310,8 @@
       "turnCompleteDesc": "Cuando finaliza un turno del agente",
       "error": "Error del agente",
       "errorDesc": "Cuando un agente encuentra un error",
+      "permissionRequest": "Solicitud de permiso",
+      "permissionRequestDesc": "Cuando un agente solicita permiso para actuar",
       "saved": "Filtro de eventos actualizado.",
       "saveFailed": "Error al guardar el filtro de eventos."
     },

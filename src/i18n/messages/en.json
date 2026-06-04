@@ -2322,6 +2322,8 @@
       "turnCompleteDesc": "When an agent turn ends",
       "error": "Agent Error",
       "errorDesc": "When an agent encounters an error",
+      "permissionRequest": "Permission Request",
+      "permissionRequestDesc": "When an agent requests permission to act",
       "saved": "Event filter updated.",
       "saveFailed": "Failed to save event filter."
     },

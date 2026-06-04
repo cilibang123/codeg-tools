@@ -2310,6 +2310,8 @@
       "turnCompleteDesc": "에이전트 턴이 종료될 때",
       "error": "에이전트 오류",
       "errorDesc": "에이전트에 오류가 발생했을 때",
+      "permissionRequest": "권한 요청",
+      "permissionRequestDesc": "에이전트가 작업 권한을 요청할 때",
       "saved": "이벤트 필터가 업데이트되었습니다.",
       "saveFailed": "이벤트 필터 저장에 실패했습니다."
     },

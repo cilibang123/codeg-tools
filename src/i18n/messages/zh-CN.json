@@ -2322,6 +2322,8 @@
       "turnCompleteDesc": "代理回合结束时",
       "error": "代理错误",
       "errorDesc": "代理遇到错误时",
+      "permissionRequest": "权限请求",
+      "permissionRequestDesc": "智能体请求操作权限时",
       "saved": "事件过滤已更新。",
       "saveFailed": "保存事件过滤失败。"
     },

@@ -2310,6 +2310,8 @@
       "turnCompleteDesc": "Wenn eine Agentenrunde endet",
       "error": "Agentenfehler",
       "errorDesc": "Wenn ein Agent einen Fehler feststellt",
+      "permissionRequest": "Berechtigungsanfrage",
+      "permissionRequestDesc": "Wenn ein Agent eine Berechtigung anfordert",
       "saved": "Ereignisfilter aktualisiert.",
       "saveFailed": "Fehler beim Speichern des Ereignisfilters."
     },

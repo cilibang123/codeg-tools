@@ -2310,6 +2310,8 @@
       "turnCompleteDesc": "エージェントのターンが終了した時",
       "error": "エージェントエラー",
       "errorDesc": "エージェントがエラーに遭遇した時",
+      "permissionRequest": "権限リクエスト",
+      "permissionRequestDesc": "エージェントが操作の権限を要求した時",
       "saved": "イベントフィルターを更新しました。",
       "saveFailed": "イベントフィルターの保存に失敗しました。"
     },

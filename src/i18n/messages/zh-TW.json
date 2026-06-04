@@ -2310,6 +2310,8 @@
       "turnCompleteDesc": "代理回合結束時",
       "error": "代理錯誤",
       "errorDesc": "代理遇到錯誤時",
+      "permissionRequest": "權限請求",
+      "permissionRequestDesc": "智慧代理請求操作權限時",
       "saved": "事件篩選已更新。",
       "saveFailed": "儲存事件篩選失敗。"
     },

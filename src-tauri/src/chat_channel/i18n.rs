@@ -156,6 +156,53 @@ pub fn error_message_label(lang: Lang) -> &'static str {
     }
 }
 
+// ── Permission request (global event push) ──
+
+pub fn permission_request_title(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "权限请求",
+        Lang::ZhTw => "權限請求",
+        Lang::Ja => "権限リクエスト",
+        Lang::Ko => "권한 요청",
+        Lang::Es => "Solicitud de permiso",
+        Lang::De => "Berechtigungsanfrage",
+        Lang::Fr => "Demande d'autorisation",
+        Lang::Pt => "Solicitação de permissão",
+        Lang::Ar => "طلب إذن",
+        Lang::En => "Permission Request",
+    }
+}
+
+pub fn permission_request_body(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "智能体正在请求权限，请在 Codeg 中查看并批准。",
+        Lang::ZhTw => "智慧代理正在請求權限，請在 Codeg 中查看並批准。",
+        Lang::Ja => "エージェントが権限を要求しています。Codeg で確認して承認してください。",
+        Lang::Ko => "에이전트가 권한을 요청하고 있습니다. Codeg에서 확인하고 승인하세요.",
+        Lang::Es => "Un agente solicita permiso. Revísalo y apruébalo en Codeg.",
+        Lang::De => "Ein Agent fordert eine Berechtigung an. Bitte in Codeg prüfen und genehmigen.",
+        Lang::Fr => "Un agent demande une autorisation. Vérifiez-la et approuvez-la dans Codeg.",
+        Lang::Pt => "Um agente está solicitando permissão. Revise e aprove no Codeg.",
+        Lang::Ar => "يطلب أحد الوكلاء إذنًا. يرجى مراجعته والموافقة عليه في Codeg.",
+        Lang::En => "An agent is requesting permission. Review and approve it in Codeg.",
+    }
+}
+
+pub fn permission_operation_label(lang: Lang) -> &'static str {
+    match lang {
+        Lang::ZhCn => "请求操作",
+        Lang::ZhTw => "請求操作",
+        Lang::Ja => "要求された操作",
+        Lang::Ko => "요청된 작업",
+        Lang::Es => "Operación solicitada",
+        Lang::De => "Angeforderte Aktion",
+        Lang::Fr => "Opération demandée",
+        Lang::Pt => "Operação solicitada",
+        Lang::Ar => "العملية المطلوبة",
+        Lang::En => "Requested operation",
+    }
+}
+
 // ── Daily report ──
 
 pub fn daily_report_title(lang: Lang) -> &'static str {

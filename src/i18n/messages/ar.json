@@ -2310,6 +2310,8 @@
       "turnCompleteDesc": "عند انتهاء دور الوكيل",
       "error": "خطأ الوكيل",
       "errorDesc": "عندما يواجه الوكيل خطأ",
+      "permissionRequest": "طلب إذن",
+      "permissionRequestDesc": "عندما يطلب الوكيل إذنًا لتنفيذ إجراء",
       "saved": "تم تحديث فلتر الأحداث.",
       "saveFailed": "فشل حفظ فلتر الأحداث."
     },

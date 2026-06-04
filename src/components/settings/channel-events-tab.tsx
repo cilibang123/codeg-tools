@@ -15,6 +15,11 @@ const ALL_EVENT_TYPES = [
     descKey: "turnCompleteDesc",
   },
   { id: "error", labelKey: "error", descKey: "errorDesc" },
+  {
+    id: "permission_request",
+    labelKey: "permissionRequest",
+    descKey: "permissionRequestDesc",
+  },
 ] as const
 
 const ALL_IDS = ALL_EVENT_TYPES.map((e) => e.id)
