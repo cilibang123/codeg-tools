@@ -178,3 +178,42 @@ pub async fn check_app_update() -> Result<Json<AppUpdateCheckResult>, AppCommand
         rollback_available: server_rollback_available(),
     }))
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerUpdateStatus {
+    /// The running binary's own version — read locally (no manifest), so the
+    /// settings page can show the current version even when the release source
+    /// is unreachable.
+    pub current_version: String,
+    /// Whether this process can apply an in-place update (server build on a
+    /// supported platform). Local — no network.
+    pub self_update_supported: bool,
+    /// How a self-update would restart: `"supervised"` or `"reexec"`.
+    pub capability: crate::update::runtime::UpdateCapability,
+    /// `"docker"` | `"standalone"` — drives the post-upgrade hint.
+    pub runtime: String,
+    /// Relaunch delay (ms) the frontend countdown should use.
+    pub restart_delay_ms: u64,
+    /// A previous version is staged in `.bak` and can be rolled back to.
+    pub rollback_available: bool,
+}
+
+/// Local-only counterpart to [`check_app_update`]: reports what this process
+/// can do (self-update capability, rollback availability) WITHOUT contacting
+/// the release source. The manual rollback affordance must stay reachable even
+/// when the update manifest is unreachable (proxy, outage, air-gap), since
+/// `rollback_app` is an entirely local operation — gating it behind the
+/// network-dependent update check would hide it exactly when recovery is most
+/// needed.
+pub async fn app_update_status() -> Json<ServerUpdateStatus> {
+    use crate::update::runtime;
+    Json(ServerUpdateStatus {
+        current_version: env!("CARGO_PKG_VERSION").to_string(),
+        self_update_supported: server_self_update_supported(),
+        capability: runtime::capability(),
+        runtime: runtime::runtime_label().to_string(),
+        restart_delay_ms: runtime::restart_delay_ms(),
+        rollback_available: server_rollback_available(),
+    })
+}
