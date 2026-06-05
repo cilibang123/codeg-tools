@@ -430,6 +430,85 @@ describe("ConversationRuntimeProvider getTimelineTurns memoization", () => {
   })
 })
 
+describe("ConversationRuntimeProvider removeOptimisticTurn (bounce rollback)", () => {
+  const runtimeHolder: {
+    current: ReturnType<typeof useConversationRuntime> | undefined
+  } = { current: undefined }
+
+  function RuntimeCapture() {
+    const runtime = useConversationRuntime()
+    useEffect(() => {
+      runtimeHolder.current = runtime
+    })
+    return null
+  }
+
+  function userTurn(id: string): MessageTurn {
+    return {
+      id,
+      role: "user",
+      blocks: [{ type: "text", text: id }],
+      timestamp: "2026-05-28T00:00:00.000Z",
+    }
+  }
+
+  beforeEach(() => {
+    runtimeHolder.current = undefined
+  })
+
+  it("removes the turn by id and resets syncState to idle when none remain", () => {
+    renderProvider(<RuntimeCapture />)
+    const api = () => runtimeHolder.current!
+
+    act(() => {
+      api().appendOptimisticTurn(7, userTurn("t1"), "t1")
+    })
+    expect(api().getSession(7)?.optimisticTurns).toHaveLength(1)
+    expect(api().getSession(7)?.syncState).toBe("awaiting_persist")
+
+    act(() => {
+      api().removeOptimisticTurn(7, "t1")
+    })
+    // Optimistic turn rolled back, and awaiting_persist cleared so the next
+    // detail fetch reconciles cleanly instead of preserving a stale turn.
+    expect(api().getSession(7)?.optimisticTurns).toHaveLength(0)
+    expect(api().getSession(7)?.syncState).toBe("idle")
+  })
+
+  it("keeps awaiting_persist while another optimistic turn is still in flight", () => {
+    renderProvider(<RuntimeCapture />)
+    const api = () => runtimeHolder.current!
+
+    act(() => {
+      api().appendOptimisticTurn(8, userTurn("a"), "a")
+    })
+    act(() => {
+      api().appendOptimisticTurn(8, userTurn("b"), "b")
+    })
+    act(() => {
+      api().removeOptimisticTurn(8, "a")
+    })
+    const session = api().getSession(8)
+    expect(session?.optimisticTurns.map((t) => t.id)).toEqual(["b"])
+    expect(session?.syncState).toBe("awaiting_persist")
+  })
+
+  it("is a no-op for an unknown id", () => {
+    renderProvider(<RuntimeCapture />)
+    const api = () => runtimeHolder.current!
+
+    act(() => {
+      api().appendOptimisticTurn(9, userTurn("keep"), "keep")
+    })
+    act(() => {
+      api().removeOptimisticTurn(9, "does-not-exist")
+    })
+    const after = api().getSession(9)
+    expect(after?.optimisticTurns.map((t) => t.id)).toEqual(["keep"])
+    expect(after?.syncState).toBe("awaiting_persist")
+  })
+})
+
 /**
  * Delegation-child viewer projection in `getTimelineTurns`. When the sub-agent
  * dialog marks a session `liveOwnsActiveTurn` and supplies the kickoff task:
@@ -757,5 +836,184 @@ describe("ConversationRuntimeProvider streaming/local turn dedup", () => {
       .map((t) => t.turn.id)
     expect(ids.filter((id) => id === "live-99-lm-dup2")).toHaveLength(1)
     expect(new Set(ids).size).toBe(ids.length)
+  })
+})
+
+/**
+ * Cross-client VIEWER user-turn synthesis (Bug 2). When another client sends a
+ * prompt, this client (a viewer of the shared connection) only receives the
+ * assistant stream — `appendViewerUserTurn` synthesizes the sender's user turn
+ * so the reply doesn't render headless. It reuses the optimistic→local
+ * promotion machinery, is a no-op on the SENDER (which renders its own
+ * optimistic turn), and is idempotent by turn id.
+ */
+describe("ConversationRuntimeProvider viewer user-turn synthesis", () => {
+  const runtimeHolder: {
+    current: ReturnType<typeof useConversationRuntime> | undefined
+  } = { current: undefined }
+
+  function RuntimeCapture() {
+    const runtime = useConversationRuntime()
+    useEffect(() => {
+      runtimeHolder.current = runtime
+    })
+    return null
+  }
+
+  function userTurn(id: string): MessageTurn {
+    return {
+      id,
+      role: "user",
+      blocks: [{ type: "text", text: id }],
+      timestamp: "2026-05-28T00:00:00.000Z",
+    }
+  }
+
+  function assistantTurn(id: string): MessageTurn {
+    return {
+      id,
+      role: "assistant",
+      blocks: [{ type: "text", text: id }],
+      timestamp: "2026-05-28T00:00:00.000Z",
+    }
+  }
+
+  function detailWithTurns(turns: MessageTurn[]): DbConversationDetail {
+    return {
+      summary: {
+        id: 99,
+        folder_id: 1,
+        agent_type: "codex",
+        title: "c",
+        status: "in_progress",
+        model: null,
+        git_branch: null,
+        external_id: "ext-1",
+        message_count: turns.length,
+        created_at: "2026-05-28T00:00:00.000Z",
+        updated_at: "2026-05-28T00:00:00.000Z",
+      },
+      turns,
+      session_stats: null,
+    }
+  }
+
+  const LIVE: LiveMessage = {
+    id: "lm-v",
+    role: "assistant",
+    content: [],
+    startedAt: 0,
+  }
+
+  beforeEach(() => {
+    runtimeHolder.current = undefined
+    mockGetFolderConversation.mockReset()
+  })
+
+  it("synthesizes the sender's user turn for a viewer", () => {
+    renderProvider(<RuntimeCapture />)
+    const api = () => runtimeHolder.current!
+    act(() => {
+      api().appendViewerUserTurn(99, userTurn("user-c-5"))
+    })
+    const users = api()
+      .getTimelineTurns(99)
+      .filter((t) => t.turn.role === "user")
+    expect(users).toHaveLength(1)
+    expect(users[0].turn.id).toBe("user-c-5")
+  })
+
+  it("is a NO-OP on the sender — its echo shares the optimistic turn id (exact dedup)", () => {
+    renderProvider(<RuntimeCapture />)
+    const api = () => runtimeHolder.current!
+    // Sender appended its own optimistic turn on send; the UI threaded that id
+    // to the backend, which echoes it as the user_message message_id…
+    act(() => {
+      api().appendOptimisticTurn(99, userTurn("optimistic-x"), "tok")
+    })
+    // …so the broadcast echo (SAME id) dedups — no second user turn.
+    act(() => {
+      api().appendViewerUserTurn(99, userTurn("optimistic-x"))
+    })
+    const users = api()
+      .getTimelineTurns(99)
+      .filter((t) => t.turn.role === "user")
+    expect(users).toHaveLength(1)
+    expect(users[0].turn.id).toBe("optimistic-x")
+  })
+
+  it("does NOT suppress a different sender's prompt when this client has an unrelated optimistic turn (co-control)", () => {
+    renderProvider(<RuntimeCapture />)
+    const api = () => runtimeHolder.current!
+    // This client has its own in-flight optimistic turn (it sent something)…
+    act(() => {
+      api().appendOptimisticTurn(99, userTurn("mine-1"), "tok")
+    })
+    // …and ANOTHER client's user_message arrives with a DIFFERENT id. Exact-id
+    // dedup must NOT suppress it (a broad "has optimistic turns" guard would).
+    act(() => {
+      api().appendViewerUserTurn(99, userTurn("theirs-2"))
+    })
+    const users = api()
+      .getTimelineTurns(99)
+      .filter((t) => t.turn.role === "user")
+    expect(users.map((u) => u.turn.id)).toEqual(["mine-1", "theirs-2"])
+  })
+
+  it("is idempotent: a re-delivered user_message after promotion does not duplicate", () => {
+    renderProvider(<RuntimeCapture />)
+    const api = () => runtimeHolder.current!
+    act(() => {
+      api().appendViewerUserTurn(99, userTurn("user-c-5"))
+    })
+    // Turn completes → the synthesized user turn promotes into localTurns.
+    act(() => {
+      api().completeTurn(99, LIVE)
+    })
+    // A snapshot re-delivers the SAME user_message — dedups against localTurns.
+    act(() => {
+      api().appendViewerUserTurn(99, userTurn("user-c-5"))
+    })
+    const users = api()
+      .getTimelineTurns(99)
+      .filter((t) => t.turn.role === "user")
+    expect(users).toHaveLength(1)
+    expect(users[0].turn.id).toBe("user-c-5")
+  })
+
+  it("promotes the synthesized user turn to a local turn on completion (survives the live→local handoff)", () => {
+    renderProvider(<RuntimeCapture />)
+    const api = () => runtimeHolder.current!
+    act(() => {
+      api().appendViewerUserTurn(99, userTurn("user-c-5"))
+    })
+    act(() => {
+      api().completeTurn(99, LIVE)
+    })
+    const session = api().getSession(99)
+    expect(session?.optimisticTurns).toHaveLength(0)
+    expect(session?.localTurns.some((t) => t.id === "user-c-5")).toBe(true)
+  })
+
+  it("synthesizes the CURRENT turn's user message even when the persisted transcript already has prior user turns (multi-turn viewer)", async () => {
+    // Viewer cold-opened a conversation WITH history, then the owner sends a
+    // new turn. The prior persisted user turn must NOT suppress the synthesis —
+    // this is the multi-turn case a `!persistedHasUser` guard would break.
+    mockGetFolderConversation.mockResolvedValueOnce(
+      detailWithTurns([userTurn("u-old"), assistantTurn("a-old")])
+    )
+    renderProvider(<RuntimeCapture />)
+    const api = () => runtimeHolder.current!
+    await act(async () => {
+      api().refetchDetail(99)
+      await Promise.resolve()
+    })
+    act(() => {
+      api().appendViewerUserTurn(99, userTurn("user-c-9"))
+    })
+    const users = api()
+      .getTimelineTurns(99)
+      .filter((t) => t.turn.role === "user")
+    expect(users.map((u) => u.turn.id)).toEqual(["u-old", "user-c-9"])
   })
 })
