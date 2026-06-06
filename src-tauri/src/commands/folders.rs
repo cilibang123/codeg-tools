@@ -549,16 +549,36 @@ pub async fn open_folder_by_id_core(
 }
 
 pub async fn remove_folder_from_workspace_core(
+    emitter: &EventEmitter,
     db: &AppDatabase,
     folder_id: i32,
 ) -> Result<(), AppCommandError> {
     use crate::db::service::tab_service;
-    tab_service::delete_tabs_for_folder(&db.conn, folder_id)
-        .await
-        .map_err(AppCommandError::from)?;
     folder_service::set_folder_open(&db.conn, folder_id, false)
         .await
-        .map_err(AppCommandError::from)
+        .map_err(AppCommandError::from)?;
+
+    // Atomically drop this folder's open tabs + bump the version (always, as a
+    // barrier so a concurrent stale save can't resurrect them) + snapshot, in one
+    // transaction. Broadcast the new set only when a persisted tab actually
+    // changed (sentinel origin "server" so every client applies it); a zero-row
+    // removal just advances the barrier — an in-flight saver reconciles via its
+    // rejected CAS.
+    let inv = tab_service::delete_folder_tabs_and_bump(&db.conn, folder_id)
+        .await
+        .map_err(AppCommandError::from)?;
+    if let Some(tabs) = inv.emit {
+        crate::web::event_bridge::emit_event(
+            emitter,
+            crate::web::event_bridge::TABS_CHANGED_EVENT,
+            crate::web::event_bridge::TabsChanged {
+                version: inv.version,
+                origin: "server".to_string(),
+                tabs,
+            },
+        );
+    }
+    Ok(())
 }
 
 pub async fn reorder_folders_core(db: &AppDatabase, ids: Vec<i32>) -> Result<(), AppCommandError> {
@@ -676,10 +696,11 @@ pub async fn open_folder_by_id(
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn remove_folder_from_workspace(
+    app: tauri::AppHandle,
     db: tauri::State<'_, AppDatabase>,
     folder_id: i32,
 ) -> Result<(), AppCommandError> {
-    remove_folder_from_workspace_core(&db, folder_id).await
+    remove_folder_from_workspace_core(&EventEmitter::Tauri(app), &db, folder_id).await
 }
 
 #[cfg(feature = "tauri-runtime")]

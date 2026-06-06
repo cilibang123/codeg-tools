@@ -177,6 +177,29 @@ pub enum ConversationChange {
     Status { id: i32, status: String },
 }
 
+/// Global side-channel for cross-client open-tab sync. Mirrors
+/// [`CONVERSATION_CHANGED_EVENT`]: a single [`emit_event`] reaches the Tauri
+/// webview and every WebSocket client.
+pub const TABS_CHANGED_EVENT: &str = "tabs://changed";
+
+/// Payload for the [`TABS_CHANGED_EVENT`] side-channel. Carries the full
+/// conversation-bound tab set (a snapshot, not a delta) so every client
+/// converges idempotently — matching the full-replacement save semantics.
+///
+/// - `version` — workspace-global logical clock; clients drop events at or
+///   below their last-applied version (except `origin == "server"`).
+/// - `origin` — the originating client's id, echoed back so the originator can
+///   ignore its own broadcast; the sentinel `"server"` marks cascade-originated
+///   changes (folder removal, conversation deletion) that every client applies.
+/// - `tabs` — the canonical persisted set; `is_active` marks the focused tab,
+///   which is mirrored across clients.
+#[derive(Debug, Clone, Serialize)]
+pub struct TabsChanged {
+    pub version: i64,
+    pub origin: String,
+    pub tabs: Vec<crate::models::OpenedTab>,
+}
+
 /// Unified event emission: serializes the payload exactly once and dispatches
 /// the shared `Arc<Value>` to both the Tauri webview and the web broadcaster.
 pub fn emit_event(emitter: &EventEmitter, event: &str, payload: impl Serialize) {
@@ -367,5 +390,32 @@ mod tests {
             rx.try_recv().is_err(),
             "non-status ACP events must not emit on conversation://changed"
         );
+    }
+
+    #[test]
+    fn emit_event_broadcasts_tabs_changed_snapshot() {
+        // The open-tab set syncs via the same global side-channel as the
+        // sidebar: one `emit_event` on `tabs://changed` reaches every client,
+        // carrying version + origin (for echo suppression) + the full set.
+        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let mut rx = broadcaster.subscribe();
+        let emitter = EventEmitter::test_web_only(broadcaster.clone());
+
+        emit_event(
+            &emitter,
+            TABS_CHANGED_EVENT,
+            TabsChanged {
+                version: 6,
+                origin: "win-abc".to_string(),
+                tabs: vec![],
+            },
+        );
+
+        let evt = rx.try_recv().expect("tabs change should broadcast");
+        let p = &*evt.payload;
+        assert_eq!(evt.channel, TABS_CHANGED_EVENT);
+        assert_eq!(p["version"], 6);
+        assert_eq!(p["origin"], "win-abc");
+        assert!(p["tabs"].is_array(), "tabs must serialize as an array");
     }
 }

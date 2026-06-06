@@ -55,7 +55,7 @@ pub async fn list_child_conversations(
 
 pub async fn list_opened_tabs(
     Extension(state): Extension<Arc<AppState>>,
-) -> Result<Json<Vec<OpenedTab>>, AppCommandError> {
+) -> Result<Json<OpenedTabsSnapshot>, AppCommandError> {
     Ok(Json(
         conv_commands::list_opened_tabs_core(&state.db.conn).await?,
     ))
@@ -65,14 +65,24 @@ pub async fn list_opened_tabs(
 #[serde(rename_all = "camelCase")]
 pub struct SaveOpenedTabsParams {
     pub items: Vec<OpenedTab>,
+    pub expected_version: i64,
+    pub origin: String,
 }
 
 pub async fn save_opened_tabs(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<SaveOpenedTabsParams>,
-) -> Result<Json<()>, AppCommandError> {
-    conv_commands::save_opened_tabs_core(&state.db.conn, params.items).await?;
-    Ok(Json(()))
+) -> Result<Json<SaveTabsOutcome>, AppCommandError> {
+    Ok(Json(
+        conv_commands::save_opened_tabs_core(
+            &state.db.conn,
+            &state.emitter,
+            params.items,
+            params.expected_version,
+            params.origin,
+        )
+        .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -241,5 +251,11 @@ pub async fn delete_conversation(
 ) -> Result<Json<()>, AppCommandError> {
     conv_commands::delete_conversation_core(&state.db.conn, params.conversation_id).await?;
     conv_commands::emit_conversation_deleted(&state.emitter, params.conversation_id);
+    conv_commands::cleanup_tabs_for_deleted_conversation(
+        &state.emitter,
+        &state.db.conn,
+        params.conversation_id,
+    )
+    .await;
     Ok(Json(()))
 }

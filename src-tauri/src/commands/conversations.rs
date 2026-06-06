@@ -14,7 +14,8 @@ use crate::parsers::openclaw::OpenClawParser;
 use crate::parsers::opencode::OpenCodeParser;
 use crate::parsers::{path_eq_for_matching, AgentParser, ParseError};
 use crate::web::event_bridge::{
-    emit_event, ConversationChange, EventEmitter, CONVERSATION_CHANGED_EVENT,
+    emit_event, ConversationChange, EventEmitter, TabsChanged, CONVERSATION_CHANGED_EVENT,
+    TABS_CHANGED_EVENT,
 };
 
 pub async fn list_all_conversations_core(
@@ -82,36 +83,67 @@ pub async fn list_child_conversations(
 
 pub async fn list_opened_tabs_core(
     conn: &sea_orm::DatabaseConnection,
-) -> Result<Vec<OpenedTab>, AppCommandError> {
-    tab_service::list_all_tabs(conn)
+) -> Result<OpenedTabsSnapshot, AppCommandError> {
+    // Single-transaction snapshot: reading tabs and version separately could
+    // tear under a concurrent save (old tabs stamped with the new version).
+    let (items, version) = tab_service::snapshot_tabs(conn)
         .await
-        .map_err(AppCommandError::from)
+        .map_err(AppCommandError::from)?;
+    Ok(OpenedTabsSnapshot { items, version })
 }
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn list_opened_tabs(
     db: tauri::State<'_, AppDatabase>,
-) -> Result<Vec<OpenedTab>, AppCommandError> {
+) -> Result<OpenedTabsSnapshot, AppCommandError> {
     list_opened_tabs_core(&db.conn).await
 }
 
+/// Persist the open-tab set with compare-and-set on the workspace tab version,
+/// then broadcast the new set on `tabs://changed` (echoing `origin` so the
+/// originating client ignores its own change). A stale save (version mismatch —
+/// another client committed first) is rejected without writing or emitting; the
+/// caller gets `accepted: false` plus the current truth to reconcile.
 pub async fn save_opened_tabs_core(
     conn: &sea_orm::DatabaseConnection,
+    emitter: &EventEmitter,
     items: Vec<OpenedTab>,
-) -> Result<(), AppCommandError> {
-    tab_service::save_all_tabs(conn, items)
+    expected_version: i64,
+    origin: String,
+) -> Result<SaveTabsOutcome, AppCommandError> {
+    let outcome = tab_service::save_all_tabs_cas(conn, items, expected_version)
         .await
-        .map_err(AppCommandError::from)
+        .map_err(AppCommandError::from)?;
+
+    if outcome.accepted {
+        emit_tabs_changed(emitter, outcome.version, outcome.tabs.clone(), origin);
+    }
+
+    Ok(SaveTabsOutcome {
+        accepted: outcome.accepted,
+        version: outcome.version,
+        tabs: outcome.tabs,
+    })
 }
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn save_opened_tabs(
+    app: tauri::AppHandle,
     db: tauri::State<'_, AppDatabase>,
     items: Vec<OpenedTab>,
-) -> Result<(), AppCommandError> {
-    save_opened_tabs_core(&db.conn, items).await
+    expected_version: i64,
+    origin: String,
+) -> Result<SaveTabsOutcome, AppCommandError> {
+    save_opened_tabs_core(
+        &db.conn,
+        &EventEmitter::Tauri(app),
+        items,
+        expected_version,
+        origin,
+    )
+    .await
 }
 
 /// Synchronous implementation shared by list_conversations, list_folders, and get_stats.
@@ -770,6 +802,52 @@ pub(crate) fn emit_conversation_deleted(emitter: &EventEmitter, conversation_id:
     );
 }
 
+/// Broadcast a `tabs://changed` snapshot so every client converges its open-tab
+/// set. `origin` is the originating client's id (echoed so it can ignore its own
+/// change) or the sentinel `"server"` for cascade-originated changes that every
+/// client applies.
+pub(crate) fn emit_tabs_changed(
+    emitter: &EventEmitter,
+    version: i64,
+    tabs: Vec<OpenedTab>,
+    origin: String,
+) {
+    emit_event(
+        emitter,
+        TABS_CHANGED_EVENT,
+        TabsChanged {
+            version,
+            origin,
+            tabs,
+        },
+    );
+}
+
+/// Invalidate any open tabs pointing at a just-deleted conversation. Conversation
+/// deletion is a SOFT delete, so the FK CASCADE never removes the tab row — we do
+/// it explicitly. The tab version is ALWAYS advanced as a barrier (so a
+/// concurrent stale save can't re-add a tab for the deleted conversation), but we
+/// only broadcast when a persisted tab actually changed — a zero-row deletion
+/// needs no broadcast (an in-flight saver reconciles via its rejected CAS). Lives
+/// at the wrapper layer (not in `delete_conversation_core`) so internal/test
+/// callers don't fire tab events.
+pub(crate) async fn cleanup_tabs_for_deleted_conversation(
+    emitter: &EventEmitter,
+    conn: &sea_orm::DatabaseConnection,
+    conversation_id: i32,
+) {
+    match tab_service::delete_conversation_tabs_and_bump(conn, conversation_id).await {
+        Ok(inv) => {
+            if let Some(tabs) = inv.emit {
+                emit_tabs_changed(emitter, inv.version, tabs, "server".to_string());
+            }
+        }
+        Err(e) => eprintln!(
+            "[conversations] tab cleanup failed (delete tabs for conversation {conversation_id}): {e}"
+        ),
+    }
+}
+
 /// Core logic for creating a conversation with git branch detection.
 /// Shared by both the Tauri command and the web handler.
 pub async fn create_conversation_core(
@@ -893,7 +971,9 @@ pub async fn delete_conversation(
     conversation_id: i32,
 ) -> Result<(), AppCommandError> {
     delete_conversation_core(&db.conn, conversation_id).await?;
-    emit_conversation_deleted(&EventEmitter::Tauri(app), conversation_id);
+    let emitter = EventEmitter::Tauri(app);
+    emit_conversation_deleted(&emitter, conversation_id);
+    cleanup_tabs_for_deleted_conversation(&emitter, &db.conn, conversation_id).await;
     Ok(())
 }
 
@@ -1540,42 +1620,363 @@ mod tests {
     #[tokio::test]
     async fn list_opened_tabs_core_empty_db_returns_empty() {
         let db = fresh_in_memory_db().await;
-        let tabs = list_opened_tabs_core(&db.conn).await.expect("list");
-        assert!(tabs.is_empty());
+        let snap = list_opened_tabs_core(&db.conn).await.expect("list");
+        assert!(snap.items.is_empty());
+        assert_eq!(snap.version, 0, "fresh db starts at version 0");
+    }
+
+    fn conv_tab(folder_id: i32, conversation_id: i32, agent_type: AgentType) -> OpenedTab {
+        OpenedTab {
+            id: 0,
+            folder_id,
+            conversation_id: Some(conversation_id),
+            agent_type,
+            position: 0,
+            is_active: false,
+            is_pinned: true,
+        }
     }
 
     #[tokio::test]
-    async fn save_opened_tabs_core_roundtrip() {
+    async fn save_opened_tabs_core_persists_only_conversation_tabs_and_bumps_version() {
         let db = fresh_in_memory_db().await;
         let folder_id = seed_folder(&db, "/tmp/codeg-tabs-test").await;
+        let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
+            .await
+            .expect("c1");
+        let c2 = create_conversation_core(&db.conn, folder_id, AgentType::Codex, None)
+            .await
+            .expect("c2");
+        let (broadcaster, emitter) = sync_test_emitter();
+        let mut rx = broadcaster.subscribe();
+
         let items = vec![
+            conv_tab(folder_id, c1, AgentType::ClaudeCode),
+            conv_tab(folder_id, c2, AgentType::Codex),
+            // A draft (conversation_id == None) — must NOT persist.
             OpenedTab {
                 id: 0,
                 folder_id,
                 conversation_id: None,
-                agent_type: AgentType::ClaudeCode,
-                position: 0,
+                agent_type: AgentType::Gemini,
+                position: 2,
                 is_active: true,
-                is_pinned: false,
-            },
-            OpenedTab {
-                id: 0,
-                folder_id,
-                conversation_id: None,
-                agent_type: AgentType::Codex,
-                position: 1,
-                is_active: false,
-                is_pinned: false,
+                is_pinned: true,
             },
         ];
-        save_opened_tabs_core(&db.conn, items).await.expect("save");
-        let tabs = list_opened_tabs_core(&db.conn).await.expect("list");
-        assert_eq!(
-            tabs.len(),
-            2,
-            "expected 2 tabs roundtrip, got {}",
-            tabs.len()
+        let outcome = save_opened_tabs_core(&db.conn, &emitter, items, 0, "win-a".into())
+            .await
+            .expect("save");
+        assert!(outcome.accepted);
+        assert_eq!(outcome.version, 1);
+        assert_eq!(outcome.tabs.len(), 2, "draft tab must be stripped");
+
+        let evt = rx.try_recv().expect("accepted save should broadcast");
+        assert_eq!(evt.channel, TABS_CHANGED_EVENT);
+        assert_eq!(evt.payload["version"], 1);
+        assert_eq!(evt.payload["origin"], "win-a");
+        assert_eq!(evt.payload["tabs"].as_array().unwrap().len(), 2);
+
+        let snap = list_opened_tabs_core(&db.conn).await.expect("list");
+        assert_eq!(snap.items.len(), 2);
+        assert_eq!(snap.version, 1);
+    }
+
+    #[tokio::test]
+    async fn save_opened_tabs_core_rejects_stale_version_without_emitting() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-tabs-stale").await;
+        let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
+            .await
+            .expect("c1");
+
+        // First save at v0 → v1.
+        let first = save_opened_tabs_core(
+            &db.conn,
+            &EventEmitter::Noop,
+            vec![conv_tab(folder_id, c1, AgentType::ClaudeCode)],
+            0,
+            "a".into(),
+        )
+        .await
+        .expect("first save");
+        assert!(first.accepted);
+        assert_eq!(first.version, 1);
+
+        // Second save built from the now-stale v0 must be rejected, no emit.
+        let (broadcaster, emitter) = sync_test_emitter();
+        let mut rx = broadcaster.subscribe();
+        let stale = save_opened_tabs_core(
+            &db.conn,
+            &emitter,
+            vec![], // would have cleared all tabs — must NOT take effect
+            0,
+            "b".into(),
+        )
+        .await
+        .expect("stale save returns Ok with accepted=false");
+        assert!(!stale.accepted);
+        assert_eq!(stale.version, 1, "rejected save reports current version");
+        assert!(
+            rx.try_recv().is_err(),
+            "a stale (rejected) save must not broadcast"
         );
+
+        // The original tab survived — the stale empty save did not clobber it.
+        let snap = list_opened_tabs_core(&db.conn).await.expect("list");
+        assert_eq!(snap.items.len(), 1);
+        assert_eq!(snap.version, 1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_tabs_for_deleted_conversation_removes_tab_and_emits() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-tab-conv-del").await;
+        let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
+            .await
+            .expect("c1");
+        save_opened_tabs_core(
+            &db.conn,
+            &EventEmitter::Noop,
+            vec![conv_tab(folder_id, c1, AgentType::ClaudeCode)],
+            0,
+            "a".into(),
+        )
+        .await
+        .expect("save");
+
+        let (broadcaster, emitter) = sync_test_emitter();
+        let mut rx = broadcaster.subscribe();
+        delete_conversation_core(&db.conn, c1).await.expect("delete");
+        cleanup_tabs_for_deleted_conversation(&emitter, &db.conn, c1).await;
+
+        let snap = list_opened_tabs_core(&db.conn).await.expect("list");
+        assert!(
+            snap.items.is_empty(),
+            "tab for a soft-deleted conversation must be removed (no ghost tab)"
+        );
+        let evt = rx.try_recv().expect("cleanup should broadcast");
+        assert_eq!(evt.channel, TABS_CHANGED_EVENT);
+        assert_eq!(evt.payload["origin"], "server");
+        assert_eq!(evt.payload["tabs"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn cleanup_tabs_for_deleted_conversation_bumps_barrier_without_emitting_when_no_open_tab() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-tab-conv-del-noop").await;
+        let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
+            .await
+            .expect("c1");
+        let before = list_opened_tabs_core(&db.conn).await.expect("list").version;
+        let (broadcaster, emitter) = sync_test_emitter();
+        let mut rx = broadcaster.subscribe();
+        cleanup_tabs_for_deleted_conversation(&emitter, &db.conn, c1).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "no persisted tab → no broadcast (in-flight savers reconcile via rejected CAS)"
+        );
+        let after = list_opened_tabs_core(&db.conn).await.expect("list").version;
+        assert_eq!(
+            after,
+            before + 1,
+            "deletion still advances the version as a barrier against stale saves"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_folder_from_workspace_cleans_tabs_and_emits() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-folder-remove-tabs").await;
+        let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
+            .await
+            .expect("c1");
+        save_opened_tabs_core(
+            &db.conn,
+            &EventEmitter::Noop,
+            vec![conv_tab(folder_id, c1, AgentType::ClaudeCode)],
+            0,
+            "a".into(),
+        )
+        .await
+        .expect("save");
+
+        let (broadcaster, emitter) = sync_test_emitter();
+        let mut rx = broadcaster.subscribe();
+        crate::commands::folders::remove_folder_from_workspace_core(&emitter, &db, folder_id)
+            .await
+            .expect("remove folder");
+
+        let snap = list_opened_tabs_core(&db.conn).await.expect("list");
+        assert!(snap.items.is_empty(), "folder removal must drop its tabs");
+        let evt = rx
+            .try_recv()
+            .expect("folder removal should broadcast a tab change");
+        assert_eq!(evt.channel, TABS_CHANGED_EVENT);
+        assert_eq!(evt.payload["origin"], "server");
+    }
+
+    #[tokio::test]
+    async fn stale_save_after_conversation_cleanup_is_rejected_no_resurrection() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-tab-cleanup-race").await;
+        let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
+            .await
+            .expect("c1");
+        let c2 = create_conversation_core(&db.conn, folder_id, AgentType::Codex, None)
+            .await
+            .expect("c2");
+
+        // Both tabs open at v0 → v1.
+        let saved = save_opened_tabs_core(
+            &db.conn,
+            &EventEmitter::Noop,
+            vec![
+                conv_tab(folder_id, c1, AgentType::ClaudeCode),
+                conv_tab(folder_id, c2, AgentType::Codex),
+            ],
+            0,
+            "a".into(),
+        )
+        .await
+        .expect("save");
+        assert_eq!(saved.version, 1);
+
+        // Server deletes c1 and atomically cleans its tab → v2 (only c2 remains).
+        delete_conversation_core(&db.conn, c1).await.expect("delete c1");
+        cleanup_tabs_for_deleted_conversation(&EventEmitter::Noop, &db.conn, c1).await;
+
+        // A client still on the pre-cleanup version re-saves the OLD set (with c1
+        // present). The version bump must reject it — and c1 must NOT resurrect.
+        let stale = save_opened_tabs_core(
+            &db.conn,
+            &EventEmitter::Noop,
+            vec![
+                conv_tab(folder_id, c1, AgentType::ClaudeCode),
+                conv_tab(folder_id, c2, AgentType::Codex),
+            ],
+            1,
+            "b".into(),
+        )
+        .await
+        .expect("stale save returns Ok");
+        assert!(
+            !stale.accepted,
+            "a save built on the pre-cleanup version must be rejected"
+        );
+        assert_eq!(stale.version, 2);
+
+        let snap = list_opened_tabs_core(&db.conn).await.expect("list");
+        assert_eq!(snap.items.len(), 1, "c1 must not be resurrected");
+        assert_eq!(snap.items[0].conversation_id, Some(c2));
+        assert_eq!(snap.version, 2);
+    }
+
+    #[tokio::test]
+    async fn stale_save_after_folder_removal_is_rejected_no_resurrection() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-folder-remove-race").await;
+        let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
+            .await
+            .expect("c1");
+        let saved = save_opened_tabs_core(
+            &db.conn,
+            &EventEmitter::Noop,
+            vec![conv_tab(folder_id, c1, AgentType::ClaudeCode)],
+            0,
+            "a".into(),
+        )
+        .await
+        .expect("save");
+        assert_eq!(saved.version, 1);
+
+        // Removing the folder atomically drops its tabs + bumps to v2.
+        crate::commands::folders::remove_folder_from_workspace_core(
+            &EventEmitter::Noop,
+            &db,
+            folder_id,
+        )
+        .await
+        .expect("remove folder");
+
+        // A stale re-add of the folder's tab (still on v1) must be rejected.
+        let stale = save_opened_tabs_core(
+            &db.conn,
+            &EventEmitter::Noop,
+            vec![conv_tab(folder_id, c1, AgentType::ClaudeCode)],
+            1,
+            "b".into(),
+        )
+        .await
+        .expect("stale save returns Ok");
+        assert!(!stale.accepted, "save on the pre-removal version must be rejected");
+
+        let snap = list_opened_tabs_core(&db.conn).await.expect("list");
+        assert!(
+            snap.items.is_empty(),
+            "folder removal's version bump must block the stale re-add"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_save_referencing_deleted_conversation_is_rejected_no_ghost() {
+        // The zero-row cleanup race: client A opened c1 but its save is still
+        // debouncing (no persisted c1 tab yet). c1 is deleted — cleanup removes
+        // zero rows but still advances the version barrier. A's in-flight save
+        // (built on the pre-deletion version, still listing c1) is then rejected,
+        // so a tab for the soft-deleted conversation is never persisted.
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-tab-zero-row-race").await;
+        let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
+            .await
+            .expect("c1");
+        let c2 = create_conversation_core(&db.conn, folder_id, AgentType::Codex, None)
+            .await
+            .expect("c2");
+
+        // Only c2 is persisted as a tab (v0 → v1); c1 is open on A but unsaved.
+        let saved = save_opened_tabs_core(
+            &db.conn,
+            &EventEmitter::Noop,
+            vec![conv_tab(folder_id, c2, AgentType::Codex)],
+            0,
+            "init".into(),
+        )
+        .await
+        .expect("save");
+        assert_eq!(saved.version, 1);
+
+        // c1 deleted with no persisted c1 tab → zero rows removed, but the
+        // version barrier still advances (v1 → v2) and nothing is broadcast.
+        delete_conversation_core(&db.conn, c1).await.expect("delete c1");
+        let (broadcaster, emitter) = sync_test_emitter();
+        let mut rx = broadcaster.subscribe();
+        cleanup_tabs_for_deleted_conversation(&emitter, &db.conn, c1).await;
+        assert!(rx.try_recv().is_err(), "zero-row cleanup must not broadcast");
+
+        // A's debounced save (built on v1, still including the now-deleted c1) is
+        // rejected by the barrier — c1 must not be persisted as a ghost.
+        let stale = save_opened_tabs_core(
+            &db.conn,
+            &EventEmitter::Noop,
+            vec![
+                conv_tab(folder_id, c1, AgentType::ClaudeCode),
+                conv_tab(folder_id, c2, AgentType::Codex),
+            ],
+            1,
+            "a".into(),
+        )
+        .await
+        .expect("stale save returns Ok");
+        assert!(
+            !stale.accepted,
+            "a save built before the deletion barrier must be rejected"
+        );
+        assert_eq!(stale.version, 2);
+
+        let snap = list_opened_tabs_core(&db.conn).await.expect("list");
+        assert_eq!(snap.items.len(), 1, "no ghost tab for the deleted c1");
+        assert_eq!(snap.items[0].conversation_id, Some(c2));
     }
 
     #[tokio::test]
