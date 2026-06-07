@@ -94,10 +94,10 @@ export function PetPanel() {
   return (
     <div
       ref={wrapperRef}
-      className="w-screen p-2"
+      className="w-screen p-1"
       style={{ background: "transparent" }}
     >
-      <div className="flex w-full flex-col overflow-hidden rounded-xl border border-border/70 bg-card/95 shadow-lg backdrop-blur">
+      <div className="flex w-full flex-col overflow-hidden rounded-xl bg-card/95 backdrop-blur">
         <header className="flex items-center justify-between gap-2 border-b border-border/60 px-3 py-2">
           <div className="text-sm font-semibold">
             {t("panel.title")}
