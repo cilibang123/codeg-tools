@@ -87,6 +87,7 @@ import { toErrorMessage } from "@/lib/app-error"
 import type { GitBranchList, GitConflictInfo } from "@/lib/types"
 import { useActiveFolder } from "@/contexts/active-folder-context"
 import { useAppWorkspace } from "@/contexts/app-workspace-context"
+import { useTabContext } from "@/contexts/tab-context"
 import { useTaskContext } from "@/contexts/task-context"
 import { useAlertContext } from "@/contexts/alert-context"
 import { useGitCredential } from "@/contexts/git-credential-context"
@@ -120,7 +121,8 @@ export function BranchDropdown() {
   const t = useTranslations("Folder.branchDropdown")
   const tCommon = useTranslations("Folder.common")
   const { activeFolder } = useActiveFolder()
-  const { branches, refreshFolder, openFolder } = useAppWorkspace()
+  const { branches, refreshFolder, openWorktreeFolder } = useAppWorkspace()
+  const { openNewConversationTab } = useTabContext()
   const { addTask, updateTask, removeTask } = useTaskContext()
   const { pushAlert } = useAlertContext()
   const { withCredentialRetry } = useGitCredential()
@@ -359,7 +361,13 @@ export function BranchDropdown() {
     setWorktreeOpen(false)
     await runGitTask(t("tasks.newWorktree", { name }), async () => {
       await gitWorktreeAdd(folderPath, name, wtPath)
-      await openFolder(wtPath)
+      // Register the worktree as a folder parented to this repo (flattened to
+      // the root), then open a draft conversation in it. Once child folders are
+      // merged under their parent in the sidebar, a worktree with no
+      // conversations would otherwise be unreachable; this also lands the new
+      // session with its cwd set to the worktree directory (detail.path).
+      const detail = await openWorktreeFolder(wtPath, folderId)
+      openNewConversationTab(detail.id, detail.path)
     })
   }
 
