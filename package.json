@@ -58,6 +58,7 @@
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^2.1.9",
+    "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "shadcn": "^3.8.4",
     "shiki": "^3.22.0",

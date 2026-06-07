@@ -2092,18 +2092,16 @@ function parseCliExecutionEnvelope(text: string): {
 
 const TextPart = memo(function TextPart({
   text,
-  preserveNewlines = false,
+  softBreaks = false,
 }: {
   text: string
-  preserveNewlines?: boolean
+  // User-authored text opts in so single newlines survive as line breaks
+  // (chat input commonly relies on them) while Markdown still renders.
+  softBreaks?: boolean
 }) {
-  if (preserveNewlines) {
-    return <div className="whitespace-pre-wrap break-words text-sm">{text}</div>
-  }
-
   return (
     <div className='break-words text-sm prose prose-sm dark:prose-invert max-w-none [&_ul]:list-inside [&_ol]:list-inside [&_[data-streamdown="code-block-body"]]:max-h-96 [&_[data-streamdown="code-block-body"]]:overflow-auto'>
-      <MessageResponse>{text}</MessageResponse>
+      <MessageResponse softBreaks={softBreaks}>{text}</MessageResponse>
     </div>
   )
 })
@@ -2583,7 +2581,7 @@ export const ContentPartsRenderer = memo(function ContentPartsRenderer({
         <TextPart
           key={`text-${keyId}`}
           text={part.text}
-          preserveNewlines={role === "user"}
+          softBreaks={role === "user"}
         />
       )
     }
