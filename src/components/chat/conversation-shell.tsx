@@ -183,7 +183,7 @@ export function ConversationShell({
   }, [claudeApiRetry, tAcp])
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="relative flex h-full min-h-0 flex-col">
       <div className="flex-1 min-h-0">{children}</div>
 
       <PermissionDialog
@@ -193,55 +193,65 @@ export function ConversationShell({
 
       <QuestionDialog question={pendingQuestion} onAnswer={onAnswerQuestion} />
 
-      <AskQuestionCard
-        key={pendingAskQuestion?.question_id ?? "none"}
-        question={pendingAskQuestion}
-        onAnswer={onAnswerAskQuestion}
-      />
+      {/* Composer dock — the ask-question card floats above it as an overlay so
+          it never squeezes the message list above it, and aligns to the input
+          width. */}
+      <div className="relative">
+        {pendingAskQuestion && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-full z-20">
+            <div className="pointer-events-auto mx-auto w-full max-w-3xl px-4">
+              <AskQuestionCard
+                question={pendingAskQuestion}
+                onAnswer={onAnswerAskQuestion}
+              />
+            </div>
+          </div>
+        )}
 
-      {!hideInput && feedbackList && (
-        <div className="mx-auto w-full max-w-3xl px-4">{feedbackList}</div>
-      )}
+        {!hideInput && feedbackList && (
+          <div className="mx-auto w-full max-w-3xl px-4">{feedbackList}</div>
+        )}
 
-      {!hideInput && (
-        <div className="mx-auto w-full max-w-3xl">
-          <ChatInput
-            status={status}
-            promptCapabilities={promptCapabilities}
-            defaultPath={defaultPath}
-            agentName={agentName}
-            onFocus={onFocus}
-            onSend={onSend}
-            onCancel={onCancel}
-            modes={modes}
-            configOptions={configOptions}
-            modeLoading={modeLoading}
-            configOptionsLoading={configOptionsLoading}
-            selectorsLoading={selectorsLoading}
-            selectedModeId={selectedModeId}
-            onModeChange={onModeChange}
-            onConfigOptionChange={onConfigOptionChange}
-            agentType={agentType}
-            availableCommands={availableCommands}
-            attachmentTabId={attachmentTabId}
-            draftStorageKey={draftStorageKey}
-            isActive={isActive}
-            queue={queue}
-            onEnqueue={onEnqueue}
-            onQueueReorder={onQueueReorder}
-            onQueueEdit={onQueueEdit}
-            onQueueDelete={onQueueDelete}
-            editingItemId={editingItemId}
-            editingDraftText={editingDraftText}
-            isEditingQueueItem={isEditingQueueItem}
-            onSaveQueueEdit={onSaveQueueEdit}
-            onCancelQueueEdit={onCancelQueueEdit}
-            onForkSend={onForkSend}
-            onAddFeedback={onAddFeedback}
-            feedbackAddDisabled={feedbackAddDisabled}
-          />
-        </div>
-      )}
+        {!hideInput && (
+          <div className="mx-auto w-full max-w-3xl">
+            <ChatInput
+              status={status}
+              promptCapabilities={promptCapabilities}
+              defaultPath={defaultPath}
+              agentName={agentName}
+              onFocus={onFocus}
+              onSend={onSend}
+              onCancel={onCancel}
+              modes={modes}
+              configOptions={configOptions}
+              modeLoading={modeLoading}
+              configOptionsLoading={configOptionsLoading}
+              selectorsLoading={selectorsLoading}
+              selectedModeId={selectedModeId}
+              onModeChange={onModeChange}
+              onConfigOptionChange={onConfigOptionChange}
+              agentType={agentType}
+              availableCommands={availableCommands}
+              attachmentTabId={attachmentTabId}
+              draftStorageKey={draftStorageKey}
+              isActive={isActive}
+              queue={queue}
+              onEnqueue={onEnqueue}
+              onQueueReorder={onQueueReorder}
+              onQueueEdit={onQueueEdit}
+              onQueueDelete={onQueueDelete}
+              editingItemId={editingItemId}
+              editingDraftText={editingDraftText}
+              isEditingQueueItem={isEditingQueueItem}
+              onSaveQueueEdit={onSaveQueueEdit}
+              onCancelQueueEdit={onCancelQueueEdit}
+              onForkSend={onForkSend}
+              onAddFeedback={onAddFeedback}
+              feedbackAddDisabled={feedbackAddDisabled}
+            />
+          </div>
+        )}
+      </div>
 
       {retryLineText && (
         <div className="border-t border-destructive/20 bg-destructive/5 px-4 py-2 text-xs text-destructive">
