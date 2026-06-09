@@ -80,6 +80,18 @@ pub fn external_transcript_sources() -> Vec<ExternalSource> {
             is_file: true,
             include_top: None,
         },
+        ExternalSource {
+            // Hermes self-manages its session store at `~/.hermes/state.db`.
+            // WAL caveat: `is_file` archives only the main DB file, not the
+            // `-wal`/`-shm` sidecars, so a cold backup taken mid-write can miss
+            // the newest un-checkpointed frames (same known limitation as
+            // OpenCode). This does NOT affect live reads — the parser's `mode=ro`
+            // connection sees committed WAL frames.
+            agent: "hermes",
+            root: hermes::resolve_hermes_home_dir().join("state.db"),
+            is_file: true,
+            include_top: None,
+        },
     ];
     if let Some(home) = dirs::home_dir() {
         sources.push(ExternalSource {
