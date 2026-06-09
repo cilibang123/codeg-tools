@@ -491,6 +491,13 @@ pub async fn spawn_agent_connection(
     )
     .await;
 
+    // Align ~/.hermes/.env's base-URL var with config.yaml's model.base_url so
+    // Hermes' auxiliary tasks (title generation, compression, …) resolve the
+    // same endpoint as the main conversation. Best-effort; never blocks launch.
+    if agent_type == AgentType::Hermes {
+        crate::commands::acp::reconcile_hermes_runtime_env(&runtime_env);
+    }
+
     let agent = build_agent(agent_type, &runtime_env).await?;
 
     // Forward only the codeg git credential helper keys into the terminal

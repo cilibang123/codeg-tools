@@ -2540,6 +2540,150 @@ fn plan_hermes_write(
     Ok((config_yaml, env_updates))
 }
 
+/// Compare two base URLs for equality, ignoring a trailing slash — every Hermes
+/// endpoint rstrips `/`, so `https://x/v1` and `https://x/v1/` are the same host
+/// and must not churn a managed/symlinked `.env` on every launch. Used for the
+/// reconcile decision ONLY; the value written to `.env` stays verbatim.
+fn base_url_eq(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
+}
+
+/// Decide how to reconcile the active provider's base-URL `.env` variable with
+/// `config.yaml`'s `model.base_url`, so Hermes' auxiliary credential path —
+/// `auth.py::resolve_api_key_provider_credentials`, which reads the endpoint
+/// ONLY from the provider's `<X>_BASE_URL` env var — resolves the SAME endpoint
+/// as the main loop, which reads `config.yaml model.base_url`. Hermes' own
+/// `hermes model`/`hermes setup` writes `model.base_url` but never the `.env`
+/// var, so auxiliary tasks (title generation, compression, …) silently fall
+/// back to the provider's registry-default host and 401 against the wrong
+/// endpoint. The settings panel already mirrors both on save; this covers
+/// configs authored outside codeg.
+///
+/// Scope is the single ACTIVE provider's own base-URL var, never another
+/// provider's. Returns `Some((env_var, value))` to write — `value` is the
+/// verbatim `model.base_url`, or `""` to clear a stale override that would
+/// otherwise bleed into the auxiliary path — or `None` for a no-op. Unknown /
+/// legacy providers and ones with no base-URL var (OAuth, Bedrock,
+/// kimi-coding-cn) map to `None`.
+fn plan_hermes_base_url_reconcile(
+    provider: &str,
+    yaml_base_url: Option<&str>,
+    current_env_value: Option<&str>,
+) -> Option<(&'static str, String)> {
+    let meta = hermes_provider(provider).filter(|p| !p.base_url_env_var.is_empty())?;
+    let desired = yaml_base_url.map(str::trim).unwrap_or_default();
+    // A base URL carrying an embedded newline would let `patch_env_text` emit an
+    // extra `.env` line — injecting ANOTHER provider's var and breaking the
+    // single-active-var invariant. config.yaml is the user's own file, but skip
+    // rather than corrupt `.env` (the panel's `plan_hermes_write` rejects
+    // newlines the same way). A blank-after-trim value still falls through to the
+    // empty/clear path below.
+    if desired.contains(['\n', '\r']) {
+        return None;
+    }
+    let current = current_env_value.unwrap_or_default();
+    if desired.is_empty() {
+        // No endpoint in config.yaml. Clear a stale, non-empty override so it
+        // can't shadow the registry default in the auxiliary path; leave an
+        // absent/empty var alone (don't append a redundant `KEY=`).
+        if current.is_empty() {
+            return None;
+        }
+        return Some((meta.base_url_env_var, String::new()));
+    }
+    if base_url_eq(desired, current) {
+        return None;
+    }
+    Some((meta.base_url_env_var, desired.to_string()))
+}
+
+/// Reconcile `~/.hermes/.env`'s base-URL variable with `config.yaml`'s
+/// `model.base_url` for the active provider, right before launching Hermes, so
+/// auxiliary tasks and the main loop hit the same endpoint (see
+/// `plan_hermes_base_url_reconcile`). Best-effort: a failure here must never
+/// block a launch, so the result is logged and swallowed.
+///
+/// Note: for `openai-api` this sets `OPENAI_BASE_URL`, which makes Hermes log a
+/// one-time "OPENAI_BASE_URL is set but provider is not custom" warning. That is
+/// a false positive — `OPENAI_BASE_URL` IS the correct base-URL var for
+/// `openai-api` — so do not "fix" it by dropping the var.
+/// Resolve the Hermes home a launch with `runtime_env` will actually use, so
+/// reconcile patches the same `.env` the launched process reads.
+///
+/// When the agent's `env_json` sets `HERMES_HOME` it lands in `runtime_env`,
+/// which `merge_agent_env` gives highest precedence — so it *replaces* the
+/// parent's value in the child. We must resolve that override exactly as the
+/// launched Hermes' own `get_hermes_home` does: trim it; a non-empty value is
+/// used VERBATIM (`Path(val)` — Hermes does NOT expand `~`); a blank value falls
+/// back to the default `~/.hermes` (it does NOT re-inherit the parent). With no
+/// override the child inherits the parent env, so defer to `hermes_home_dir()`
+/// (codeg's existing resolution, shared with the settings panel).
+fn hermes_home_for_launch(runtime_env: &BTreeMap<String, String>) -> PathBuf {
+    match runtime_env.get("HERMES_HOME") {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                home_dir_or_default().join(".hermes")
+            } else {
+                PathBuf::from(trimmed)
+            }
+        }
+        None => hermes_home_dir(),
+    }
+}
+
+pub(crate) fn reconcile_hermes_runtime_env(runtime_env: &BTreeMap<String, String>) {
+    if let Err(err) = reconcile_hermes_runtime_env_in(&hermes_home_for_launch(runtime_env)) {
+        eprintln!("[ACP][Hermes] base_url reconcile skipped: {err}");
+    }
+}
+
+/// Inner reconcile keyed on an explicit home dir (so tests drive a tempdir
+/// without mutating `HERMES_HOME`). No-ops when `config.yaml` is absent — it
+/// must never create `~/.hermes`; a config written later goes through the panel
+/// (which already mirrors the base URL) or a subsequent launch.
+fn reconcile_hermes_runtime_env_in(home: &Path) -> Result<(), AcpError> {
+    let config_path = home.join("config.yaml");
+    let Ok(raw_yaml) = fs::read_to_string(&config_path) else {
+        return Ok(());
+    };
+    let value: serde_yaml::Value = serde_yaml::from_str(&raw_yaml)
+        .map_err(|e| AcpError::protocol(format!("parse hermes config.yaml: {e}")))?;
+    let Some(model_section) = value.get("model") else {
+        return Ok(());
+    };
+    let Some(provider) = yaml_str(model_section, "provider") else {
+        return Ok(());
+    };
+    let yaml_base_url = yaml_str(model_section, "base_url");
+
+    let env_path = home.join(".env");
+    // Only a MISSING `.env` is an empty baseline. An existing-but-unreadable file
+    // (non-UTF-8, permission-denied, …) must abort the reconcile — patching from
+    // an empty baseline would rewrite `.env` with just the base-URL line and drop
+    // the user's API keys and comments. A dangling symlink reads as NotFound and
+    // is correctly created fresh (0600) by `write_hermes_secret_file`.
+    let existing_env = match fs::read_to_string(&env_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(AcpError::protocol(format!("read hermes .env: {e}"))),
+    };
+    let env_map = parse_env_file(&existing_env);
+    let current = hermes_provider(&provider)
+        .filter(|p| !p.base_url_env_var.is_empty())
+        .and_then(|p| env_map.get(p.base_url_env_var))
+        .map(String::as_str);
+
+    let Some((var, val)) =
+        plan_hermes_base_url_reconcile(&provider, yaml_base_url.as_deref(), current)
+    else {
+        return Ok(());
+    };
+
+    let patched = patch_env_text(&existing_env, &[(var, val.as_str())]);
+    write_hermes_secret_file(&env_path, &patched, ".env")
+}
+
 fn agent_local_config_path(agent_type: AgentType) -> Option<PathBuf> {
     match agent_type {
         AgentType::ClaudeCode => Some(home_dir_or_default().join(".claude").join("settings.json")),
@@ -6594,6 +6738,341 @@ mod tests {
         fs::set_permissions(&managed, fs::Permissions::from_mode(0o755)).unwrap();
         ensure_hermes_home_secure(&managed).expect("ensure managed");
         assert_eq!(mode_of(&managed), 0o755, "existing hermes home mode preserved");
+    }
+
+    // ── Hermes base-URL reconcile (auxiliary/main endpoint parity) ──────────
+
+    #[test]
+    fn plan_hermes_base_url_reconcile_mirrors_yaml_when_env_absent() {
+        // openai-api with config.yaml model.base_url but no .env OPENAI_BASE_URL
+        // → write the var so the auxiliary path matches the main loop.
+        assert_eq!(
+            plan_hermes_base_url_reconcile("openai-api", Some("https://sub2api/v1"), None),
+            Some(("OPENAI_BASE_URL", "https://sub2api/v1".to_string()))
+        );
+    }
+
+    #[test]
+    fn plan_hermes_base_url_reconcile_no_op_when_equal() {
+        assert_eq!(
+            plan_hermes_base_url_reconcile(
+                "openai-api",
+                Some("https://sub2api/v1"),
+                Some("https://sub2api/v1"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn plan_hermes_base_url_reconcile_ignores_trailing_slash() {
+        // Trailing-slash-only differences must not churn .env (both directions).
+        assert_eq!(
+            plan_hermes_base_url_reconcile("openai-api", Some("https://x/v1/"), Some("https://x/v1")),
+            None
+        );
+        assert_eq!(
+            plan_hermes_base_url_reconcile("openai-api", Some("https://x/v1"), Some("https://x/v1/")),
+            None
+        );
+    }
+
+    #[test]
+    fn plan_hermes_base_url_reconcile_clears_stale_when_yaml_empty() {
+        // config.yaml has no base_url but .env carries a stale override → clear it
+        // (empty value) so it can't shadow the registry default in the aux path.
+        assert_eq!(
+            plan_hermes_base_url_reconcile("openai-api", None, Some("https://old/v1")),
+            Some(("OPENAI_BASE_URL", String::new()))
+        );
+    }
+
+    #[test]
+    fn plan_hermes_base_url_reconcile_no_op_when_both_empty() {
+        // Absent var and explicitly-empty var both → no-op (no redundant `KEY=`).
+        assert_eq!(plan_hermes_base_url_reconcile("openai-api", None, None), None);
+        assert_eq!(plan_hermes_base_url_reconcile("openai-api", None, Some("")), None);
+        assert_eq!(plan_hermes_base_url_reconcile("openai-api", Some("  "), Some("")), None);
+    }
+
+    #[test]
+    fn plan_hermes_base_url_reconcile_skips_unknown_provider() {
+        for p in ["custom", "openai", "custom:my-proxy", "totally-unknown"] {
+            assert_eq!(
+                plan_hermes_base_url_reconcile(p, Some("https://x/v1"), None),
+                None,
+                "unknown provider {p} must be a no-op"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_hermes_base_url_reconcile_skips_providers_without_base_url_var() {
+        // OAuth / AWS / kimi-coding-cn carry no base-URL env var → never written,
+        // even when config.yaml has a base_url.
+        for p in ["nous", "bedrock", "kimi-coding-cn"] {
+            assert_eq!(
+                plan_hermes_base_url_reconcile(p, Some("https://x/v1"), None),
+                None,
+                "provider {p} has no base_url env var"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_hermes_base_url_reconcile_openrouter_only_touches_its_own_var() {
+        // openrouter never returns an OPENAI_BASE_URL write (that would re-pollute
+        // the panel's neutralization); it only reconciles OPENROUTER_BASE_URL.
+        assert_eq!(plan_hermes_base_url_reconcile("openrouter", None, None), None);
+        assert_eq!(
+            plan_hermes_base_url_reconcile("openrouter", Some("https://or/api/v1"), None),
+            Some(("OPENROUTER_BASE_URL", "https://or/api/v1".to_string()))
+        );
+    }
+
+    #[test]
+    fn plan_hermes_base_url_reconcile_covers_non_needs_base_url_providers() {
+        // The aux/main asymmetry is not limited to openai-api — a proxied anthropic
+        // (base_url in YAML, not in .env) has the same divergence.
+        assert_eq!(
+            plan_hermes_base_url_reconcile("anthropic", Some("https://proxy/anthropic"), None),
+            Some(("ANTHROPIC_BASE_URL", "https://proxy/anthropic".to_string()))
+        );
+    }
+
+    #[test]
+    fn plan_hermes_base_url_reconcile_writes_verbatim_not_normalized() {
+        // When a write IS needed, the trailing slash is preserved in the value
+        // (only the comparison normalizes it).
+        assert_eq!(
+            plan_hermes_base_url_reconcile(
+                "openai-api",
+                Some("https://x/v1/"),
+                Some("https://x/other"),
+            ),
+            Some(("OPENAI_BASE_URL", "https://x/v1/".to_string()))
+        );
+    }
+
+    #[test]
+    fn plan_hermes_base_url_reconcile_rejects_embedded_newline() {
+        // A base_url carrying a newline must never be mirrored — it would inject an
+        // extra `.env` line (another provider's var) through patch_env_text.
+        assert_eq!(
+            plan_hermes_base_url_reconcile(
+                "openai-api",
+                Some("https://x/v1\nOPENROUTER_BASE_URL=https://evil"),
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            plan_hermes_base_url_reconcile(
+                "openai-api",
+                Some("https://x/v1\rFOO=bar"),
+                Some("https://x/v1"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn reconcile_writes_env_and_is_idempotent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        fs::write(
+            home.join("config.yaml"),
+            "model:\n  provider: openai-api\n  default: gpt-5.5\n  base_url: https://sub2api/v1\n",
+        )
+        .unwrap();
+        fs::write(home.join(".env"), "OPENAI_API_KEY=sk-secret\n").unwrap();
+
+        reconcile_hermes_runtime_env_in(home).expect("reconcile");
+        let env = fs::read_to_string(home.join(".env")).unwrap();
+        assert!(
+            env.contains("OPENAI_BASE_URL=https://sub2api/v1"),
+            "base url mirrored: {env:?}"
+        );
+        assert!(
+            env.contains("OPENAI_API_KEY=sk-secret"),
+            "existing key preserved: {env:?}"
+        );
+
+        // Second run is a pure no-op: content AND mtime unchanged (the planner
+        // returns None, so .env is never reopened for writing).
+        let mtime1 = fs::metadata(home.join(".env")).unwrap().modified().unwrap();
+        reconcile_hermes_runtime_env_in(home).expect("reconcile again");
+        assert_eq!(
+            fs::read_to_string(home.join(".env")).unwrap(),
+            env,
+            "idempotent content"
+        );
+        assert_eq!(
+            fs::metadata(home.join(".env")).unwrap().modified().unwrap(),
+            mtime1,
+            "idempotent run must not rewrite .env"
+        );
+    }
+
+    #[test]
+    fn reconcile_no_op_without_config_yaml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        fs::write(home.join(".env"), "OPENAI_API_KEY=sk\n").unwrap();
+        reconcile_hermes_runtime_env_in(home).expect("reconcile");
+        assert_eq!(
+            fs::read_to_string(home.join(".env")).unwrap(),
+            "OPENAI_API_KEY=sk\n",
+            ".env must be byte-identical when there is no config.yaml"
+        );
+    }
+
+    #[test]
+    fn reconcile_preserves_openrouter_neutralization() {
+        // openrouter with no model.base_url + the panel's empty OPENAI_* masks must
+        // survive untouched (reconcile only ever considers OPENROUTER_BASE_URL).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        fs::write(
+            home.join("config.yaml"),
+            "model:\n  provider: openrouter\n  default: x\n",
+        )
+        .unwrap();
+        let env = "OPENROUTER_API_KEY=sk-or\nOPENAI_API_KEY=\nOPENAI_BASE_URL=\n";
+        fs::write(home.join(".env"), env).unwrap();
+        reconcile_hermes_runtime_env_in(home).expect("reconcile");
+        assert_eq!(
+            fs::read_to_string(home.join(".env")).unwrap(),
+            env,
+            "neutralization preserved"
+        );
+    }
+
+    #[test]
+    fn reconcile_clears_stale_base_url_on_disk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        // openai-api with no base_url in config.yaml, but a stale OPENAI_BASE_URL.
+        fs::write(
+            home.join("config.yaml"),
+            "model:\n  provider: openai-api\n  default: gpt-5.5\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join(".env"),
+            "OPENAI_API_KEY=sk\nOPENAI_BASE_URL=https://old/v1\n",
+        )
+        .unwrap();
+        reconcile_hermes_runtime_env_in(home).expect("reconcile");
+        let env = fs::read_to_string(home.join(".env")).unwrap();
+        assert!(env.contains("OPENAI_BASE_URL=\n"), "stale base url cleared: {env:?}");
+        assert!(env.contains("OPENAI_API_KEY=sk"), "key preserved: {env:?}");
+    }
+
+    #[test]
+    fn reconcile_skips_unreadable_env_without_clobbering() {
+        // An existing-but-unreadable `.env` (invalid UTF-8) must abort the
+        // reconcile, not be rewritten from an empty baseline — otherwise the
+        // user's API keys/comments would be dropped on launch.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        fs::write(
+            home.join("config.yaml"),
+            "model:\n  provider: openai-api\n  base_url: https://sub2api/v1\n",
+        )
+        .unwrap();
+        let raw: &[u8] = b"\xff\xfeOPENAI_API_KEY=sk-secret\n";
+        fs::write(home.join(".env"), raw).unwrap();
+        assert!(
+            reconcile_hermes_runtime_env_in(home).is_err(),
+            "an unreadable .env must surface an error, not silently patch from empty"
+        );
+        assert_eq!(
+            fs::read(home.join(".env")).unwrap(),
+            raw.to_vec(),
+            "an unreadable .env must be left byte-identical, never clobbered"
+        );
+    }
+
+    #[test]
+    fn hermes_home_for_launch_matches_hermes_resolution() {
+        // A non-empty override is used VERBATIM — Hermes' get_hermes_home does
+        // `Path(val.strip())` with no `~` expansion, so reconcile must not expand
+        // either (both an absolute path and a literal `~/…` path are passed as-is).
+        let mut abs = BTreeMap::new();
+        abs.insert("HERMES_HOME".to_string(), "/tmp/hermes-alt".to_string());
+        assert_eq!(hermes_home_for_launch(&abs), PathBuf::from("/tmp/hermes-alt"));
+
+        let mut tilde = BTreeMap::new();
+        tilde.insert("HERMES_HOME".to_string(), "~/alt-hermes".to_string());
+        assert_eq!(hermes_home_for_launch(&tilde), PathBuf::from("~/alt-hermes"));
+
+        // A blank override REPLACES the parent value in the child, and Hermes then
+        // falls back to the default `~/.hermes` — not the parent's HERMES_HOME.
+        let mut blank = BTreeMap::new();
+        blank.insert("HERMES_HOME".to_string(), "  ".to_string());
+        assert_eq!(
+            hermes_home_for_launch(&blank),
+            home_dir_or_default().join(".hermes")
+        );
+
+        // No override → the child inherits the parent env (codeg's resolution).
+        assert_eq!(hermes_home_for_launch(&BTreeMap::new()), hermes_home_dir());
+    }
+
+    #[test]
+    fn reconcile_wrapper_targets_runtime_env_home() {
+        // End-to-end: the wrapper must patch the `.env` under the launch env's
+        // HERMES_HOME, not the parent/default home.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        fs::write(
+            home.join("config.yaml"),
+            "model:\n  provider: openai-api\n  base_url: https://sub2api/v1\n",
+        )
+        .unwrap();
+        fs::write(home.join(".env"), "OPENAI_API_KEY=sk\n").unwrap();
+        let mut runtime_env = BTreeMap::new();
+        runtime_env.insert("HERMES_HOME".to_string(), home.display().to_string());
+
+        reconcile_hermes_runtime_env(&runtime_env);
+        let env = fs::read_to_string(home.join(".env")).unwrap();
+        assert!(
+            env.contains("OPENAI_BASE_URL=https://sub2api/v1"),
+            "wrapper reconciled the runtime_env HERMES_HOME: {env:?}"
+        );
+        assert!(env.contains("OPENAI_API_KEY=sk"), "key preserved: {env:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconcile_writes_through_symlinked_env() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+        fs::write(
+            home.join("config.yaml"),
+            "model:\n  provider: openai-api\n  base_url: https://sub2api/v1\n",
+        )
+        .unwrap();
+        // .env is a symlink to a real target (dotfile-manager layout).
+        let real = home.join("vault.env");
+        fs::write(&real, "OPENAI_API_KEY=sk\n").unwrap();
+        std::os::unix::fs::symlink(&real, home.join(".env")).unwrap();
+
+        reconcile_hermes_runtime_env_in(home).expect("reconcile");
+        assert!(
+            fs::symlink_metadata(home.join(".env"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "symlink preserved"
+        );
+        let env = fs::read_to_string(&real).unwrap();
+        assert!(
+            env.contains("OPENAI_BASE_URL=https://sub2api/v1"),
+            "target updated: {env:?}"
+        );
+        assert!(env.contains("OPENAI_API_KEY=sk"), "key preserved: {env:?}");
     }
 
     #[cfg(unix)]
