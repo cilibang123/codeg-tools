@@ -2,6 +2,7 @@ import type { PromptInputBlock } from "@/lib/types"
 import { randomUUID } from "@/lib/utils"
 
 import type { InputAttachment } from "../message-input-attachments"
+import { parseCodegReferenceUri as parseReferenceUri } from "./reference-uri"
 import type { ReferenceAttrs } from "./types"
 
 /**
@@ -94,58 +95,11 @@ export function blocksToRestoredDraft(
   return { segments, attachments }
 }
 
-// Schemes the composer emits as structured references (mirror reference-node.ts).
-const SESSION_URI = /^codeg:\/\/session\/(.+)$/i
-const COMMIT_URI = /^codeg:\/\/commit\/.*@(.+)$/i
-
-/**
- * Parse a sent resource uri back into a reference, or null when it isn't a
- * composer reference scheme (in which case it's restored as an attachment).
- */
-export function parseReferenceUri(
-  uri: string,
-  name: string
-): ReferenceAttrs | null {
-  const lower = uri.toLowerCase()
-
-  if (lower.startsWith("file:")) {
-    const base = fileBaseName(uri)
-    return {
-      refType: "file",
-      id: base || uri,
-      label: name || base || uri,
-      uri,
-      meta: { fileKind: "file" },
-    }
-  }
-
-  const session = uri.match(SESSION_URI)
-  if (session) {
-    const id = session[1]
-    return {
-      refType: "session",
-      id,
-      label: name || `#${id}`,
-      uri,
-      meta: null,
-    }
-  }
-
-  const commit = uri.match(COMMIT_URI)
-  if (commit) {
-    const hash = commit[1]
-    const shortHash = hash.slice(0, 7)
-    return {
-      refType: "commit",
-      id: hash,
-      label: name || shortHash,
-      uri,
-      meta: { shortHash },
-    }
-  }
-
-  return null
-}
+// The reference uri grammar (file:/codeg: → ReferenceAttrs) now lives in
+// ./reference-uri, shared with transcript badge rendering. Re-exported here
+// under its historical name so existing importers (tests, queue-edit restore)
+// keep working.
+export { parseReferenceUri }
 
 /** Best-effort basename of a `file://` (or any path-shaped) uri. */
 function fileBaseName(uri: string): string {

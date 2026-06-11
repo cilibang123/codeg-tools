@@ -83,15 +83,24 @@ describe("sessionToSuggestion", () => {
     status: "in_progress",
     git_branch: "main",
   } as DbConversationSummary
-  it("maps to a session reference with a codeg uri", () => {
-    const item = sessionToSuggestion({ ...base, title: "Login refactor" })
+  it("encodes <agent_type>_<external_id> in the uri (id stays the numeric id)", () => {
+    const item = sessionToSuggestion({
+      ...base,
+      title: "Login refactor",
+      external_id: "abc123",
+    })
     expect(item.reference).toMatchObject({
       refType: "session",
       id: "123",
       label: "Login refactor",
-      uri: "codeg://session/123",
+      uri: "codeg://session/codex_abc123",
       meta: { agentType: "codex", status: "in_progress", branch: "main" },
     })
+  })
+  it("falls back to the numeric id when there is no external_id", () => {
+    expect(sessionToSuggestion({ ...base, title: "x" }).reference.uri).toBe(
+      "codeg://session/123"
+    )
   })
   it("falls back to #id when the title is empty", () => {
     expect(sessionToSuggestion({ ...base, title: null }).reference.label).toBe(

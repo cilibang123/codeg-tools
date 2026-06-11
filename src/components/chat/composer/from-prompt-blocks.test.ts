@@ -93,6 +93,28 @@ describe("blocksToRestoredDraft", () => {
     })
   })
 
+  it("recovers the agent type from a new-format session link", () => {
+    const { segments } = blocksToRestoredDraft(
+      [
+        {
+          type: "resource_link",
+          uri: "codeg://session/codex_sess1",
+          name: "My chat",
+          mime_type: null,
+          description: null,
+        },
+      ],
+      counter()
+    )
+    expect(refSegments(segments)[0]).toMatchObject({
+      refType: "session",
+      id: "codex_sess1",
+      label: "My chat",
+      uri: "codeg://session/codex_sess1",
+      meta: { agentType: "codex" },
+    })
+  })
+
   it("restores a codeg commit link as a commit reference (hash after @)", () => {
     const { segments } = blocksToRestoredDraft(
       [

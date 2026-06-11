@@ -60,17 +60,26 @@ export function agentToSuggestion(agent: AcpAgentInfo): SuggestionItem {
   }
 }
 
-/** Conversation → session reference (`codeg://session/<id>`). */
+/**
+ * Conversation → session reference. The serialization uri encodes the agent's
+ * own session id as `codeg://session/<agent_type>_<external_id>` (so a transcript
+ * badge can show the right agent icon and a future codeg-mcp can resolve it by
+ * `(agent_type, external_id)`); sessions without an `external_id` fall back to
+ * the internal numeric id. The in-app `id` stays the numeric id either way.
+ */
 export function sessionToSuggestion(
   conversation: DbConversationSummary
 ): SuggestionItem {
   const label = conversation.title?.trim() || `#${conversation.id}`
+  const uri = conversation.external_id
+    ? `codeg://session/${conversation.agent_type}_${conversation.external_id}`
+    : `codeg://session/${conversation.id}`
   return {
     reference: {
       refType: "session",
       id: String(conversation.id),
       label,
-      uri: `codeg://session/${conversation.id}`,
+      uri,
       meta: {
         agentType: conversation.agent_type,
         status: conversation.status,
