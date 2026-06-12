@@ -27,6 +27,23 @@ export function isComposerEmpty(editor: Editor): boolean {
   return !hasReference
 }
 
+// Elements that own their own click behavior: the editor surface, interactive
+// controls, and inline badges. A mousedown landing on any of these (or a
+// descendant) is NOT an "empty chrome" click.
+const NON_CHROME_SELECTOR =
+  '.ProseMirror, button, a, input, textarea, select, [role="button"], [role="combobox"], [role="menuitem"], [data-reference-badge], [contenteditable]'
+
+/**
+ * Whether a mousedown `target` landed on the message input's empty chrome — its
+ * padding, the blank space below a short message, or the gaps in the action bar
+ * — rather than on the editor surface or an interactive control. The host uses
+ * this to focus the editor when the user clicks the otherwise-dead space around
+ * it (only the editor surface itself used to be clickable).
+ */
+export function isComposerChromeClick(target: EventTarget | null): boolean {
+  return target instanceof Element && !target.closest(NON_CHROME_SELECTOR)
+}
+
 /**
  * Insert an expert as the leading inline badge of the message — experts are
  * whole-turn directives the agent inspects first, so the badge goes at the very

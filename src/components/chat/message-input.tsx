@@ -113,6 +113,7 @@ import {
 import { docToPromptBlocks } from "@/components/chat/composer/to-prompt-blocks"
 import {
   applyExpertReference,
+  isComposerChromeClick,
   isComposerEmpty,
   restoreBlocksIntoEditor,
 } from "@/components/chat/composer/composer-commands"
@@ -1975,6 +1976,21 @@ export function MessageInput({
     [isEditingQueueItem, slashMenuOpen, onCancelQueueEdit]
   )
 
+  // Clicking the input's empty chrome (its padding, the blank space below a
+  // short message, the gaps in the action bar) focuses the editor — previously
+  // only the editor surface itself was clickable. Interactive controls, inline
+  // badges and the editor surface handle their own clicks, so they're excluded;
+  // `preventDefault` keeps the editor from blurring before we refocus it.
+  const handleChromeMouseDown = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (disabled || !isComposerChromeClick(e.target)) return
+      // Keep the editor from blurring before we refocus it.
+      e.preventDefault()
+      editorRef.current?.focus()
+    },
+    [disabled]
+  )
+
   const handleContainerDragOver = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
       if (!hasDragFiles(event.dataTransfer)) return
@@ -2226,6 +2242,7 @@ export function MessageInput({
         )}
       >
         <div
+          onMouseDown={handleChromeMouseDown}
           className={cn(
             "@container relative flex flex-col bg-transparent transition-colors",
             folderBranchPickerAttached

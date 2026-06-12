@@ -5,6 +5,7 @@ import type { PromptInputBlock } from "@/lib/types"
 
 import {
   applyExpertReference,
+  isComposerChromeClick,
   isComposerEmpty,
   restoreBlocksIntoEditor,
 } from "./composer-commands"
@@ -55,6 +56,40 @@ describe("isComposerEmpty", () => {
     })
     expect(editor.isEmpty).toBe(false)
     expect(isComposerEmpty(editor)).toBe(false)
+  })
+})
+
+describe("isComposerChromeClick", () => {
+  it("treats a click on bare chrome (a plain div) as an empty-chrome click", () => {
+    expect(isComposerChromeClick(document.createElement("div"))).toBe(true)
+  })
+
+  it("excludes interactive controls and their descendants", () => {
+    const button = document.createElement("button")
+    const icon = document.createElement("span")
+    button.appendChild(icon)
+    expect(isComposerChromeClick(button)).toBe(false)
+    // closest() walks up, so a click on the button's icon is excluded too.
+    expect(isComposerChromeClick(icon)).toBe(false)
+
+    const roleButton = document.createElement("div")
+    roleButton.setAttribute("role", "button")
+    expect(isComposerChromeClick(roleButton)).toBe(false)
+  })
+
+  it("excludes the editor surface and inline badges", () => {
+    const pm = document.createElement("div")
+    pm.className = "ProseMirror"
+    expect(isComposerChromeClick(pm)).toBe(false)
+
+    const badge = document.createElement("span")
+    badge.setAttribute("data-reference-badge", "")
+    expect(isComposerChromeClick(badge)).toBe(false)
+  })
+
+  it("returns false for null / non-Element targets", () => {
+    expect(isComposerChromeClick(null)).toBe(false)
+    expect(isComposerChromeClick(document)).toBe(false)
   })
 })
 

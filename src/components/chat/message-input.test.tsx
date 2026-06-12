@@ -1,4 +1,4 @@
-import { render, waitFor, cleanup } from "@testing-library/react"
+import { render, waitFor, cleanup, fireEvent } from "@testing-library/react"
 import { NextIntlClientProvider } from "next-intl"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -78,5 +78,19 @@ describe("MessageInput (RichComposer integration)", () => {
     )
     expect(sendButton).not.toBeNull()
     expect(sendButton).toBeDisabled()
+  })
+
+  it("claims a mousedown on the input's empty chrome (P8d focus wiring)", async () => {
+    const { container } = renderInput({})
+    await waitFor(() =>
+      expect(container.querySelector('[role="textbox"]')).not.toBeNull()
+    )
+    // The bordered card carries the chrome-focus handler; a mousedown on the
+    // card itself (not on the editor or a control) is claimed via preventDefault
+    // before refocusing the editor. Asserting preventDefault (fireEvent returns
+    // false when the event was canceled) avoids relying on jsdom focus.
+    const card = container.querySelector('[class~="@container"]') as HTMLElement
+    expect(card).not.toBeNull()
+    expect(fireEvent.mouseDown(card)).toBe(false)
   })
 })
