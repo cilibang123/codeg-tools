@@ -809,6 +809,7 @@ mod tauri_app {
                 folders::create_folder_directory,
                 folders::clone_repository,
                 folders::get_git_branch,
+                folders::get_git_head,
                 folders::git_init,
                 folders::git_pull,
                 folders::git_start_pull_merge,

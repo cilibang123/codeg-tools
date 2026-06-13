@@ -1251,6 +1251,7 @@
       "mergeBranchIntoCurrent": "{branchName}을(를) {currentBranch}에 병합",
       "rebaseCurrentToBranch": "{currentBranch}를 {branchName}로 리베이스",
       "noBranch": "브랜치 없음",
+      "detachedHead": "분리된 HEAD ({sha})",
       "initGitRepo": "Git 저장소 초기화",
       "pullCode": "코드 pull",
       "fetchRemoteBranches": "원격 브랜치 가져오기",

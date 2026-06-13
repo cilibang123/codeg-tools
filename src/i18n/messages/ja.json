@@ -1251,6 +1251,7 @@
       "mergeBranchIntoCurrent": "{branchName} を {currentBranch} にマージ",
       "rebaseCurrentToBranch": "{currentBranch} を {branchName} にリベース",
       "noBranch": "ブランチなし",
+      "detachedHead": "切り離された HEAD（{sha}）",
       "initGitRepo": "Git リポジトリを初期化",
       "pullCode": "コードをプル",
       "fetchRemoteBranches": "リモートブランチをフェッチ",

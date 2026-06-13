@@ -1704,6 +1704,21 @@ export interface GitBranchList {
 }
 
 /**
+ * State of a working tree's HEAD (mirrors Rust `GitHeadInfo`). Distinguishes a
+ * non-repo, a detached HEAD, and being on a branch — the branch-only
+ * `getGitBranch` contract collapsed the last two into `null`, hiding git
+ * operations for detached repos (issue #279).
+ */
+export interface GitHeadInfo {
+  is_repo: boolean
+  /** Branch name when on a branch (incl. unborn); null when detached or non-repo. */
+  branch: string | null
+  detached: boolean
+  /** Short commit hash, present when detached. */
+  short_sha: string | null
+}
+
+/**
  * Where a branch is checked out, resolved against registered folders (mirrors
  * Rust `WorktreeResolution`). `path` is the canonical worktree/main-tree path
  * hosting the branch, or null when it is not checked out in any worktree.

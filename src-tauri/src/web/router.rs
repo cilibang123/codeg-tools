@@ -196,6 +196,7 @@ pub fn build_router(
             post(handlers::folders::create_folder_directory),
         )
         .route("/get_git_branch", post(handlers::folders::get_git_branch))
+        .route("/get_git_head", post(handlers::folders::get_git_head))
         .route(
             "/get_home_directory",
             post(handlers::folders::get_home_directory),

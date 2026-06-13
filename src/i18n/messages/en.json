@@ -1251,6 +1251,7 @@
       "mergeBranchIntoCurrent": "Merge {branchName} into {currentBranch}",
       "rebaseCurrentToBranch": "Rebase {currentBranch} onto {branchName}",
       "noBranch": "No branch",
+      "detachedHead": "Detached HEAD at {sha}",
       "initGitRepo": "Initialize Git repository",
       "pullCode": "Pull code",
       "fetchRemoteBranches": "Fetch remote branches",

@@ -1251,6 +1251,7 @@
       "mergeBranchIntoCurrent": "將 {branchName} 合併到 {currentBranch}",
       "rebaseCurrentToBranch": "將 {currentBranch} 變基到 {branchName}",
       "noBranch": "無分支",
+      "detachedHead": "分離 HEAD（{sha}）",
       "initGitRepo": "初始化 Git 倉庫",
       "pullCode": "更新程式碼",
       "fetchRemoteBranches": "提取遠端分支",

@@ -1251,6 +1251,7 @@
       "mergeBranchIntoCurrent": "دمج {branchName} في {currentBranch}",
       "rebaseCurrentToBranch": "Rebase لـ {currentBranch} على {branchName}",
       "noBranch": "بدون فرع",
+      "detachedHead": "HEAD منفصل عند {sha}",
       "initGitRepo": "تهيئة مستودع Git",
       "pullCode": "سحب الكود",
       "fetchRemoteBranches": "جلب الفروع البعيدة",

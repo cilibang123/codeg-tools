@@ -1251,6 +1251,7 @@
       "mergeBranchIntoCurrent": "Fusionar {branchName} en {currentBranch}",
       "rebaseCurrentToBranch": "Rebase de {currentBranch} sobre {branchName}",
       "noBranch": "Sin rama",
+      "detachedHead": "HEAD desacoplado en {sha}",
       "initGitRepo": "Inicializar repositorio Git",
       "pullCode": "Hacer pull del código",
       "fetchRemoteBranches": "Obtener ramas remotas",
