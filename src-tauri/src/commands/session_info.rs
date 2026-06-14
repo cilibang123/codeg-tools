@@ -293,15 +293,16 @@ fn compact_turn(turn: &MessageTurn) -> SessionMessageItem {
                     parts.push(t);
                 }
             }
-            ContentBlock::ToolUse { tool_name, .. } => {
-                // Bound the count per turn and each name's length; dedup on the
-                // truncated form so the collected `tools` can't exceed
-                // MAX_TOOLS_PER_TURN * MAX_TOOL_NAME_CHARS.
-                if tools.len() < MAX_TOOLS_PER_TURN && !tool_name.is_empty() {
-                    let name = truncate_chars(tool_name, MAX_TOOL_NAME_CHARS);
-                    if !tools.contains(&name) {
-                        tools.push(name);
-                    }
+            // Bound the count per turn and each name's length; dedup on the
+            // truncated form so the collected `tools` can't exceed
+            // MAX_TOOLS_PER_TURN * MAX_TOOL_NAME_CHARS. Once the cap is hit the
+            // guard fails and further ToolUse blocks fall through to `_`.
+            ContentBlock::ToolUse { tool_name, .. }
+                if tools.len() < MAX_TOOLS_PER_TURN && !tool_name.is_empty() =>
+            {
+                let name = truncate_chars(tool_name, MAX_TOOL_NAME_CHARS);
+                if !tools.contains(&name) {
+                    tools.push(name);
                 }
             }
             // Tool results, images, and image-generation carry no useful plain
