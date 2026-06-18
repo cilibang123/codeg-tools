@@ -4,6 +4,7 @@ import { useState } from "react"
 import { Check } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { DropdownRadioItemContent } from "@/components/chat/dropdown-radio-item-content"
+import { ModelOptionList } from "@/components/chat/model-option-list"
 
 // One selectable value within a setting (e.g. a single model or mode).
 export interface SessionSelectorOption {
@@ -20,6 +21,14 @@ export interface SessionSelectorGroup {
   options: SessionSelectorOption[]
 }
 
+// Localized labels for the searchable/virtualized list (long model lists).
+export interface SessionSelectorSearch {
+  placeholder: string
+  inputLabel: string
+  listLabel: string
+  empty: string
+}
+
 // One setting shown in the left rail (a config option, or the mode picker).
 export interface SessionSelectorSetting {
   key: string
@@ -28,6 +37,9 @@ export interface SessionSelectorSetting {
   currentLabel: string
   groups: SessionSelectorGroup[]
   onSelect: (value: string) => void
+  /** When set, the detail pane renders a searchable + virtualized list instead
+   *  of the plain button list — used for long model lists that otherwise jank. */
+  search?: SessionSelectorSearch
 }
 
 interface SessionSelectorsPanelProps {
@@ -111,54 +123,73 @@ export function SessionSelectorsPanel({
           the bug we're fixing. So: plain buttons (full native Tab/Enter/Space
           operability) with `aria-current` marking the chosen value — the same,
           honest pattern as the left rail. */}
-      <div
-        role="group"
-        aria-label={active.title}
-        className="flex min-w-0 flex-1 flex-col gap-0.5 overflow-y-auto pl-1"
-      >
-        {active.groups.map((group, groupIndex) => (
-          <div key={group.key} className="flex flex-col gap-0.5">
-            {group.name ? (
-              <div
-                className={cn(
-                  "truncate px-2 pb-0.5 text-xs font-medium text-muted-foreground",
-                  groupIndex === 0 ? "pt-1" : "mt-1 border-t pt-2"
-                )}
-              >
-                {group.name}
-              </div>
-            ) : null}
-            {group.options.map((opt) => {
-              const selected = opt.value === active.currentValue
-              return (
-                <button
-                  key={`${group.key}-${opt.value}`}
-                  type="button"
-                  aria-current={selected ? "true" : undefined}
-                  title={opt.name}
-                  onClick={() => {
-                    active.onSelect(opt.value)
-                    onAfterSelect?.()
-                  }}
+      {active.search ? (
+        // Long model lists: a searchable + virtualized list (its own scroller),
+        // so no surrounding `overflow-y-auto` wrapper here.
+        <div className="flex min-w-0 flex-1 flex-col pl-1">
+          <ModelOptionList
+            groups={active.groups}
+            currentValue={active.currentValue}
+            onSelect={(value) => {
+              active.onSelect(value)
+              onAfterSelect?.()
+            }}
+            searchPlaceholder={active.search.placeholder}
+            searchAriaLabel={active.search.inputLabel}
+            listAriaLabel={active.search.listLabel}
+            emptyLabel={active.search.empty}
+          />
+        </div>
+      ) : (
+        <div
+          role="group"
+          aria-label={active.title}
+          className="flex min-w-0 flex-1 flex-col gap-0.5 overflow-y-auto pl-1"
+        >
+          {active.groups.map((group, groupIndex) => (
+            <div key={group.key} className="flex flex-col gap-0.5">
+              {group.name ? (
+                <div
                   className={cn(
-                    "flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
-                    "hover:bg-accent hover:text-accent-foreground",
-                    selected && "bg-accent/60"
+                    "truncate px-2 pb-0.5 text-xs font-medium text-muted-foreground",
+                    groupIndex === 0 ? "pt-1" : "mt-1 border-t pt-2"
                   )}
                 >
-                  <span className="flex size-4 shrink-0 items-center justify-center pt-0.5">
-                    {selected ? <Check className="size-4" /> : null}
-                  </span>
-                  <DropdownRadioItemContent
-                    label={opt.name}
-                    description={opt.description}
-                  />
-                </button>
-              )
-            })}
-          </div>
-        ))}
-      </div>
+                  {group.name}
+                </div>
+              ) : null}
+              {group.options.map((opt) => {
+                const selected = opt.value === active.currentValue
+                return (
+                  <button
+                    key={`${group.key}-${opt.value}`}
+                    type="button"
+                    aria-current={selected ? "true" : undefined}
+                    title={opt.name}
+                    onClick={() => {
+                      active.onSelect(opt.value)
+                      onAfterSelect?.()
+                    }}
+                    className={cn(
+                      "flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                      "hover:bg-accent hover:text-accent-foreground",
+                      selected && "bg-accent/60"
+                    )}
+                  >
+                    <span className="flex size-4 shrink-0 items-center justify-center pt-0.5">
+                      {selected ? <Check className="size-4" /> : null}
+                    </span>
+                    <DropdownRadioItemContent
+                      label={opt.name}
+                      description={opt.description}
+                    />
+                  </button>
+                )
+              })}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

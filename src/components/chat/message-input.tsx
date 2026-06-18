@@ -110,11 +110,19 @@ import {
 } from "@/components/chat/conversation-context-bar"
 import { InlineModeSelector } from "@/components/chat/mode-selector"
 import { InlineSessionConfigSelector } from "@/components/chat/session-config-selector"
+import { ModelOptionPicker } from "@/components/chat/model-option-picker"
 import {
   SessionSelectorsPanel,
   type SessionSelectorGroup,
   type SessionSelectorSetting,
 } from "@/components/chat/session-selectors-panel"
+import {
+  deriveModelGroups,
+  isModelConfigOption,
+  modelListGroups,
+  MODEL_LIST_VIRTUALIZE_THRESHOLD,
+  type ModelOptionGroup,
+} from "@/lib/model-config-groups"
 import {
   getExpertIcon,
   pickExpertLocalized,
@@ -426,6 +434,21 @@ function SelectorLoadingChip({ label }: { label: string }) {
       <span>{label}</span>
     </div>
   )
+}
+
+// Groups for the searchable + virtualized model picker, or `null` when the
+// option should keep the lightweight selectors. Only the MODEL option, and only
+// when its list is long enough to jank, qualifies. Falls back to a single
+// headerless group for a long flat (un-prefixed) list.
+function modelPickerGroups(
+  option: SessionConfigOptionInfo
+): ModelOptionGroup[] | null {
+  if (!isModelConfigOption(option)) return null
+  if (option.kind.type !== "select") return null
+  if (option.kind.options.length <= MODEL_LIST_VIRTUALIZE_THRESHOLD) return null
+  // Preserve derived `provider/` groups, server-provided groups, or a flat list
+  // (never silently flatten server groups — keeps wide/collapsed consistent).
+  return modelListGroups(option)
 }
 
 export function MessageInput({
@@ -2421,15 +2444,34 @@ export function MessageInput({
   const inlineSelectorItems = (
     <>
       {hasConfigOptions &&
-        availableConfigOptions.map((option) => (
-          <InlineSessionConfigSelector
-            key={option.id}
-            option={option}
-            onSelect={(configId, valueId) =>
-              onConfigOptionChange?.(configId, valueId)
-            }
-          />
-        ))}
+        availableConfigOptions.map((option) => {
+          // Long model lists get the searchable + virtualized popover (a Radix
+          // menu of hundreds of items is the scroll jank); every other option —
+          // and short model lists — keep the lightweight inline dropdown.
+          const listGroups = modelPickerGroups(option)
+          if (listGroups) {
+            return (
+              <ModelOptionPicker
+                key={option.id}
+                option={option}
+                groups={listGroups}
+                onSelect={(configId, valueId) =>
+                  onConfigOptionChange?.(configId, valueId)
+                }
+              />
+            )
+          }
+          return (
+            <InlineSessionConfigSelector
+              key={option.id}
+              option={option}
+              derivedGroups={deriveModelGroups(option)}
+              onSelect={(configId, valueId) =>
+                onConfigOptionChange?.(configId, valueId)
+              }
+            />
+          )
+        })}
       {showModeSelector && (
         <InlineModeSelector
           modes={availableModes}
@@ -2450,8 +2492,20 @@ export function MessageInput({
       for (const option of availableConfigOptions) {
         if (option.kind.type !== "select") continue
         const kind = option.kind
-        const groups: SessionSelectorGroup[] =
-          kind.groups.length > 0
+        // Model values that carry a `provider/` prefix group by provider; every
+        // other option keeps its server groups or stays flat (`null` derived).
+        const derived = deriveModelGroups(option)
+        const groups: SessionSelectorGroup[] = derived
+          ? derived.map((group) => ({
+              key: group.key,
+              name: group.name,
+              options: group.options.map((item) => ({
+                value: item.value,
+                name: item.name,
+                description: item.description,
+              })),
+            }))
+          : kind.groups.length > 0
             ? kind.groups.map((group) => ({
                 key: group.group,
                 name: group.name,
@@ -2472,9 +2526,17 @@ export function MessageInput({
                   })),
                 },
               ]
+        // Resolve the left-rail summary against the built groups so a grouped
+        // model shows its prefix-stripped name (the provider is implied) rather
+        // than repeating `provider/`.
         const current = groups
           .flatMap((group) => group.options)
           .find((item) => item.value === kind.current_value)
+        // A long model list gets a searchable + virtualized detail pane (a plain
+        // list of hundreds of buttons janks); short lists keep plain buttons.
+        const searchable =
+          isModelConfigOption(option) &&
+          kind.options.length > MODEL_LIST_VIRTUALIZE_THRESHOLD
         result.push({
           key: `config:${option.id}`,
           title: option.name,
@@ -2482,6 +2544,14 @@ export function MessageInput({
           currentLabel: current?.name ?? kind.current_value,
           groups,
           onSelect: (value) => onConfigOptionChange?.(option.id, value),
+          ...(searchable && {
+            search: {
+              placeholder: t("searchModel"),
+              inputLabel: t("searchModelAria"),
+              listLabel: t("modelListLabel"),
+              empty: t("noModels"),
+            },
+          }),
         })
       }
     }

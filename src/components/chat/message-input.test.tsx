@@ -74,6 +74,24 @@ vi.mock("@/lib/platform", () => ({
 vi.mock("@/lib/transport", () => ({
   getActiveRemoteConnectionId: () => null,
 }))
+// virtua renders 0 rows under jsdom — render children directly so the large
+// (searchable + virtualized) model list is exercisable here too.
+vi.mock("virtua", async () => {
+  const { forwardRef, useImperativeHandle } = await import("react")
+  return {
+    VList: forwardRef(function VListMock(
+      props: { children: React.ReactNode; role?: string; id?: string },
+      ref: React.Ref<{ scrollToIndex: () => void }>
+    ) {
+      useImperativeHandle(ref, () => ({ scrollToIndex: () => {} }))
+      return (
+        <div role={props.role} id={props.id}>
+          {props.children}
+        </div>
+      )
+    }),
+  }
+})
 
 import enMessages from "@/i18n/messages/en.json"
 import type {
@@ -260,6 +278,94 @@ describe("MessageInput collapsed selectors popover", () => {
     // Selecting a value closes the controlled popover.
     await waitFor(() =>
       expect(screen.queryByRole("dialog", { name: settingsLabel })).toBeNull()
+    )
+  })
+
+  it("groups model values by their provider prefix in the cog Popover", async () => {
+    const user = userEvent.setup()
+    const onConfigOptionChange = vi.fn()
+    const groupedModel: SessionConfigOptionInfo = {
+      id: "model",
+      name: "Model",
+      description: "Pick the model",
+      category: null,
+      kind: {
+        type: "select",
+        current_value: "anthropic/claude-opus",
+        options: [
+          {
+            value: "anthropic/claude-opus",
+            name: "anthropic/claude-opus",
+            description: null,
+          },
+          { value: "openai/gpt-4o", name: "openai/gpt-4o", description: null },
+        ],
+        groups: [],
+      },
+    }
+    const { container } = renderInput({
+      configOptions: [groupedModel],
+      onConfigOptionChange,
+    })
+    await waitFor(() =>
+      expect(container.querySelector('[role="textbox"]')).not.toBeNull()
+    )
+
+    const settingsLabel = enMessages.Folder.chat.messageInput.agentSettings
+    await user.click(screen.getByRole("button", { name: settingsLabel }))
+    const popover = await screen.findByRole("dialog", { name: settingsLabel })
+
+    // The detail pane carries one header per provider namespace…
+    expect(within(popover).getByText("anthropic")).toBeInTheDocument()
+    expect(within(popover).getByText("openai")).toBeInTheDocument()
+
+    // …and the option label drops the redundant `openai/` prefix, while the
+    // committed value stays the full id. (Pick the non-current model so its
+    // label is unique to the detail pane, not echoed in the left-rail summary.)
+    await user.click(within(popover).getByRole("button", { name: /gpt-4o/ }))
+    expect(onConfigOptionChange).toHaveBeenCalledWith("model", "openai/gpt-4o")
+  })
+
+  it("uses a searchable virtualized list for a long model list", async () => {
+    const user = userEvent.setup()
+    const onConfigOptionChange = vi.fn()
+    const options = Array.from({ length: 30 }, (_, i) => ({
+      value: `openrouter/model-${i}`,
+      name: `openrouter/model-${i}`,
+      description: null,
+    }))
+    const bigModel: SessionConfigOptionInfo = {
+      id: "model",
+      name: "Model",
+      description: null,
+      category: null,
+      kind: {
+        type: "select",
+        current_value: "openrouter/model-0",
+        options,
+        groups: [],
+      },
+    }
+    const { container } = renderInput({
+      configOptions: [bigModel],
+      onConfigOptionChange,
+    })
+    await waitFor(() =>
+      expect(container.querySelector('[role="textbox"]')).not.toBeNull()
+    )
+
+    const settingsLabel = enMessages.Folder.chat.messageInput.agentSettings
+    await user.click(screen.getByRole("button", { name: settingsLabel }))
+    const popover = await screen.findByRole("dialog", { name: settingsLabel })
+
+    // A long list (> threshold) renders the searchable combobox, not plain rows.
+    const search = within(popover).getByRole("combobox")
+    await user.type(search, "model-17")
+    // Filtering narrows to the one match; the full id is committed on click.
+    await user.click(within(popover).getByRole("option", { name: /model-17/ }))
+    expect(onConfigOptionChange).toHaveBeenCalledWith(
+      "model",
+      "openrouter/model-17"
     )
   })
 
