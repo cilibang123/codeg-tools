@@ -285,6 +285,15 @@ impl AutomationEngine {
             .await
             .map_err(|e| e.to_string())?;
 
+        // A user cancel can arrive the instant run_automation's early RunStarted
+        // makes the row visible. Re-read before spawning the CLI: if a concurrent
+        // cancel_run settled this run while resolve_cwd was adding the worktree,
+        // stop here — it already emitted RunSettled — rather than spawn an agent
+        // for an already-cancelled run.
+        if run_no_longer_running(&self.db.conn, run_id).await {
+            return Ok(());
+        }
+
         // Fresh connection (session_id=None), owner-labelled "automation".
         let conn_id = self
             .manager
@@ -342,6 +351,19 @@ impl AutomationEngine {
             automation_id: auto.id,
             run_id,
         });
+
+        // Final cancel gate before the prompt — the one step that makes the agent
+        // do work. The connection is in the index now, so a cancel landing in the
+        // tiny window after this read still tears it down via cancel_run's
+        // manager.cancel. If it was cancelled while we wired up, abort like the
+        // send-error path below and converge the conversation (cancel_run could
+        // not when it ran before this row existed); the run stays cancelled.
+        if run_no_longer_running(&self.db.conn, run_id).await {
+            self.index.lock().await.remove(&conn_id);
+            let _ = self.manager.disconnect(&conn_id).await;
+            self.cancel_conversation(conversation_id).await;
+            return Ok(());
+        }
 
         match self
             .manager
@@ -759,6 +781,17 @@ async fn run_by_id(
     crate::db::entities::automation_run::Entity::find_by_id(run_id)
         .one(conn)
         .await
+}
+
+/// True only when the run was positively read in a non-`Running` state (e.g. a
+/// concurrent `cancel_run` settled it). A read error or missing row returns
+/// `false` so a transient DB hiccup never aborts a legitimate launch — the
+/// reconcile backstop still covers a genuinely lost run.
+async fn run_no_longer_running(conn: &sea_orm::DatabaseConnection, run_id: i32) -> bool {
+    matches!(
+        run_by_id(conn, run_id).await,
+        Ok(Some(run)) if run.status != AutomationRunStatus::Running
+    )
 }
 
 fn parse_agent_type(s: &str) -> Result<AgentType, String> {
