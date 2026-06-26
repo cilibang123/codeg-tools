@@ -579,6 +579,58 @@ fn bounded_tail(s: &str, max: usize) -> String {
     format!("…{}", &s[start..])
 }
 
+/// Read `reader` line-by-line as UTF-8-*lossy* text, invoking `on_line` for each
+/// line (trailing newline trimmed) and returning the accumulated text.
+///
+/// Unlike a `Lines`/`next_line()` loop — which returns `Err(InvalidData)` and so
+/// aborts the whole stream on the first non-UTF-8 byte — this preserves a
+/// non-UTF-8 line lossily. PowerShell emits OEM-codepage bytes (e.g. GBK on a
+/// zh-CN Windows) for non-ASCII installer/error text, so without this a single
+/// localized line would truncate both the live log and the failure-diagnostic
+/// tail. A genuine read error records a short note and stops — `break`, never
+/// `continue`, so a persistent error can't spin.
+async fn collect_lines_lossy<R, F>(mut reader: R, mut on_line: F) -> String
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+    F: FnMut(&str),
+{
+    use tokio::io::AsyncBufReadExt;
+
+    let mut buf = Vec::new();
+    let mut collected = String::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                // Match `Lines` semantics: strip a trailing '\n' then one '\r'.
+                if buf.last() == Some(&b'\n') {
+                    buf.pop();
+                    if buf.last() == Some(&b'\r') {
+                        buf.pop();
+                    }
+                }
+                let line = String::from_utf8_lossy(&buf);
+                on_line(line.as_ref());
+                if !collected.is_empty() {
+                    collected.push('\n');
+                }
+                collected.push_str(line.as_ref());
+            }
+            Err(e) => {
+                let note = format!("<install reader error: {e}>");
+                on_line(&note);
+                if !collected.is_empty() {
+                    collected.push('\n');
+                }
+                collected.push_str(&note);
+                break;
+            }
+        }
+    }
+    collected
+}
+
 /// Stream `child`'s stdout+stderr line-by-line as OfficeCLI install Log events,
 /// bounded by `timeout`. Returns the exit status (`None` on timeout) plus the
 /// collected stdout/stderr tails for failure diagnostics.
@@ -600,7 +652,7 @@ async fn stream_install_or_kill_tree(
     task_id: &str,
     emitter: &EventEmitter,
 ) -> io::Result<(Option<std::process::ExitStatus>, String, String)> {
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::BufReader;
 
     let pid = child.id();
     let stdout = child.stdout.take();
@@ -610,23 +662,20 @@ async fn stream_install_or_kill_tree(
         let emitter = emitter.clone();
         let task_id = task_id.to_string();
         async move {
-            let mut collected = String::new();
-            if let Some(out) = stdout {
-                let mut lines = BufReader::new(out).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    emit_officecli_install_event(
-                        &emitter,
-                        &task_id,
-                        OfficecliInstallEventKind::Log,
-                        &line,
-                    );
-                    if !collected.is_empty() {
-                        collected.push('\n');
-                    }
-                    collected.push_str(&line);
+            match stdout {
+                Some(out) => {
+                    collect_lines_lossy(BufReader::new(out), |line| {
+                        emit_officecli_install_event(
+                            &emitter,
+                            &task_id,
+                            OfficecliInstallEventKind::Log,
+                            line,
+                        );
+                    })
+                    .await
                 }
+                None => String::new(),
             }
-            collected
         }
     });
 
@@ -634,23 +683,20 @@ async fn stream_install_or_kill_tree(
         let emitter = emitter.clone();
         let task_id = task_id.to_string();
         async move {
-            let mut collected = String::new();
-            if let Some(err) = stderr {
-                let mut lines = BufReader::new(err).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    emit_officecli_install_event(
-                        &emitter,
-                        &task_id,
-                        OfficecliInstallEventKind::Log,
-                        &line,
-                    );
-                    if !collected.is_empty() {
-                        collected.push('\n');
-                    }
-                    collected.push_str(&line);
+            match stderr {
+                Some(err) => {
+                    collect_lines_lossy(BufReader::new(err), |line| {
+                        emit_officecli_install_event(
+                            &emitter,
+                            &task_id,
+                            OfficecliInstallEventKind::Log,
+                            line,
+                        );
+                    })
+                    .await
                 }
+                None => String::new(),
             }
-            collected
         }
     });
 
@@ -746,11 +792,30 @@ fn officecli_install_command(os: InstallOs) -> OfficecliInstallCommand {
                 "-ExecutionPolicy".to_string(),
                 "Bypass".to_string(),
                 "-Command".to_string(),
-                // `-TimeoutSec` bounds each script fetch so a stalled mirror
-                // fails over to GitHub instead of hanging; the binary download
-                // the script then does is bounded by OFFICECLI_INSTALL_TIMEOUT.
+                // Hardening preamble. `iex $s` runs the vendor install.ps1 in THIS
+                // same process/scope, so these settings also govern the multi-MB
+                // binary download the script does via `Invoke-WebRequest`:
+                //   • TLS 1.2 — Windows PowerShell 5.1 on older/locked-down .NET
+                //     can default to TLS 1.0, which GitHub (and most CDNs) reject.
+                //     Add it ADDITIVELY (`-bor`, so existing protocols are kept)
+                //     and ONLY when the current value is not `SystemDefault`
+                //     (value 0): a modern host that lets the OS negotiate TLS 1.3
+                //     is left exactly as-is — no regression. Compare against `0`,
+                //     not the `SystemDefault` enum member (added in .NET 4.7;
+                //     referencing it throws on 4.5/4.6 and the catch would then
+                //     skip the upgrade on exactly the old hosts that need it).
+                //   • `$ProgressPreference` — silence `Invoke-WebRequest`'s progress
+                //     rendering, which slows the binary download by orders of
+                //     magnitude on PS 5.1 (and is just noise when stdout is piped).
+                //   • `[Console]::OutputEncoding` — emit UTF-8 (no BOM) so non-ASCII
+                //     installer/error text (OEM codepage on non-English Windows)
+                //     decodes in our line reader. Best-effort (the setter can throw
+                //     with no console attached); the lossy reader is the real net.
+                //   • `-TimeoutSec` bounds each script fetch so a stalled mirror
+                //     fails over to GitHub instead of hanging; the binary download
+                //     the script then does is bounded by OFFICECLI_INSTALL_TIMEOUT.
                 format!(
-                    "$ErrorActionPreference='Stop'; try {{ $s = irm -TimeoutSec 60 {OFFICECLI_INSTALL_PS1_MIRROR_URL} }} catch {{ $s = irm -TimeoutSec 60 {OFFICECLI_INSTALL_PS1_GITHUB_URL} }}; iex $s"
+                    "$ErrorActionPreference='Stop'; try {{ $sp=[Net.ServicePointManager]::SecurityProtocol; if([int]$sp -ne 0){{ [Net.ServicePointManager]::SecurityProtocol=$sp -bor [Net.SecurityProtocolType]::Tls12 }} }} catch {{}}; $ProgressPreference='SilentlyContinue'; try {{ [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false) }} catch {{}}; try {{ $s = irm -TimeoutSec 60 {OFFICECLI_INSTALL_PS1_MIRROR_URL} }} catch {{ $s = irm -TimeoutSec 60 {OFFICECLI_INSTALL_PS1_GITHUB_URL} }}; iex $s"
                 ),
             ],
         },
@@ -1424,6 +1489,47 @@ mod tests {
         assert!(win.contains("-TimeoutSec"), "{win}");
     }
 
+    #[test]
+    fn windows_install_command_hardening_preamble_ordered() {
+        let win = officecli_install_command(InstallOs::Windows).args.join(" ");
+
+        // The hardening preamble must run before the first network fetch, and
+        // `$ProgressPreference` must also reach the vendor script run via `iex`.
+        let tls = win
+            .find("SecurityProtocol")
+            .expect("sets SecurityProtocol");
+        let progress = win
+            .find("$ProgressPreference")
+            .expect("sets $ProgressPreference");
+        let encoding = win.find("OutputEncoding").expect("sets OutputEncoding");
+        let irm = win.find("irm").expect("fetches the script via irm");
+        let iex = win.find("iex").expect("runs the script via iex");
+
+        assert!(tls < irm, "TLS must be set before the first irm: {win}");
+        assert!(
+            progress < irm,
+            "$ProgressPreference must be set before the first irm: {win}"
+        );
+        assert!(
+            encoding < irm,
+            "OutputEncoding must be set before the first irm: {win}"
+        );
+        assert!(
+            progress < iex,
+            "$ProgressPreference must be set before iex: {win}"
+        );
+
+        // The TLS upgrade is additive (`-bor … Tls12`) and guarded on a
+        // non-SystemDefault (nonzero) value so a modern host that negotiates
+        // TLS 1.3 via the OS is left untouched — no regression.
+        assert!(win.contains("-bor"), "TLS upgrade must be additive: {win}");
+        assert!(win.contains("Tls12"), "must add TLS 1.2: {win}");
+        assert!(
+            win.contains("[int]$sp -ne 0"),
+            "TLS upgrade must be guarded on non-SystemDefault: {win}"
+        );
+    }
+
     /// On timeout the *whole tree* must die, not just the direct shell — the
     /// vendor script downloads the binary in a descendant. Models that with
     /// `sh` spawning a long-lived `sleep` grandchild and asserts the grandchild
@@ -1496,5 +1602,54 @@ mod tests {
         let tail = bounded_tail(&multibyte, 800);
         assert!(tail.starts_with('…'));
         assert!(tail.chars().skip(1).all(|c| c == 'あ'));
+    }
+
+    #[tokio::test]
+    async fn collect_lines_lossy_preserves_lines_around_invalid_utf8() {
+        use std::io::Cursor;
+        // A non-UTF-8 segment (0xFF 0xFE — invalid start bytes, like GBK output
+        // on a non-English Windows) sits between two valid lines. The old
+        // `next_line()` loop would abort here and drop "third"; this must not.
+        let data = b"first\n\xff\xfe garbage\nthird\n".to_vec();
+        let mut seen: Vec<String> = Vec::new();
+        let collected =
+            collect_lines_lossy(Cursor::new(data), |l| seen.push(l.to_string())).await;
+
+        assert_eq!(seen.len(), 3, "all three lines emitted: {seen:?}");
+        assert_eq!(seen[0], "first");
+        assert_eq!(seen[2], "third");
+        assert!(
+            seen[1].contains('\u{fffd}'),
+            "invalid bytes preserved lossily, not dropped: {:?}",
+            seen[1]
+        );
+        assert!(collected.contains("first") && collected.contains("third"));
+        assert!(collected.contains('\u{fffd}'));
+    }
+
+    #[tokio::test]
+    async fn collect_lines_lossy_handles_crlf_and_partial_last_line() {
+        use std::io::Cursor;
+        // CRLF endings trimmed like `Lines`; a final line with no trailing
+        // newline is still emitted (then EOF stops the loop).
+        let data = b"a\r\nb\r\nno-newline".to_vec();
+        let mut seen: Vec<String> = Vec::new();
+        let collected =
+            collect_lines_lossy(Cursor::new(data), |l| seen.push(l.to_string())).await;
+
+        assert_eq!(seen, vec!["a", "b", "no-newline"]);
+        assert_eq!(collected, "a\nb\nno-newline");
+    }
+
+    #[tokio::test]
+    async fn collect_lines_lossy_empty_input_yields_nothing() {
+        use std::io::Cursor;
+        let mut seen: Vec<String> = Vec::new();
+        let collected =
+            collect_lines_lossy(Cursor::new(Vec::<u8>::new()), |l| seen.push(l.to_string()))
+                .await;
+
+        assert!(seen.is_empty());
+        assert!(collected.is_empty());
     }
 }
