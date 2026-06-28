@@ -2058,6 +2058,8 @@
         "slashCommands": "斜線命令",
         "slashSearchPlaceholder": "搜尋命令...",
         "slashSearchEmpty": "沒有符合的指令",
+        "experts": "專家",
+        "office": "日常辦公",
         "attachLocalUpload": "附加本機檔案",
         "attachServerFile": "附加伺服器檔案",
         "attachUploadTooLarge": "{names} 超過 {limit}MB 上傳上限，已略過。",

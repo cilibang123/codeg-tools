@@ -2058,6 +2058,8 @@
         "slashCommands": "Comandos de barra",
         "slashSearchPlaceholder": "Buscar comandos...",
         "slashSearchEmpty": "Sin comandos coincidentes",
+        "experts": "Expertos",
+        "office": "Ofimática",
         "attachLocalUpload": "Subir archivo local",
         "attachServerFile": "Seleccionar archivo del servidor",
         "attachUploadTooLarge": "{names} supera el límite de carga de {limit}MB y se omitió.",

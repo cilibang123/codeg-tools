@@ -2060,6 +2060,8 @@
         "slashCommands": "Slash commands",
         "slashSearchPlaceholder": "Search commands...",
         "slashSearchEmpty": "No matching commands",
+        "experts": "Experts",
+        "office": "Office Work",
         "attachUploadTooLarge": "{names} exceeds the {limit}MB upload limit and was skipped.",
         "attachUploadFailed": "Failed to upload {names}.",
         "attachUploadNotAFile": "{names} isn't a regular file (directory or special file) and was skipped.",

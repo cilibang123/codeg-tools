@@ -2058,6 +2058,8 @@
         "slashCommands": "Slash-Befehle",
         "slashSearchPlaceholder": "Befehle suchen...",
         "slashSearchEmpty": "Keine passenden Befehle",
+        "experts": "Experten",
+        "office": "Büroarbeit",
         "attachLocalUpload": "Lokale Datei hochladen",
         "attachServerFile": "Serverdatei auswählen",
         "attachUploadTooLarge": "{names} überschreitet das Upload-Limit von {limit}MB und wurde übersprungen.",

@@ -2058,6 +2058,8 @@
         "slashCommands": "Commandes slash",
         "slashSearchPlaceholder": "Rechercher des commandes...",
         "slashSearchEmpty": "Aucune commande correspondante",
+        "experts": "Experts",
+        "office": "Bureautique",
         "attachLocalUpload": "Téléverser un fichier local",
         "attachServerFile": "Sélectionner un fichier serveur",
         "attachUploadTooLarge": "{names} dépasse la limite de téléversement de {limit} Mo et a été ignoré.",

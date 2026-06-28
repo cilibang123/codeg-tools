@@ -34,12 +34,16 @@ const subscribers = new Set<(snapshot: ExpertInstallStatus[]) => void>()
 async function loadSnapshot(): Promise<ExpertInstallStatus[] | null> {
   if (inflight) return inflight
   const myGeneration = generation
-  inflight = Promise.all([
+  const request: Promise<ExpertInstallStatus[] | null> = Promise.all([
     expertsListAllInstallStatuses(),
     officecliSkillListAllInstallStatuses(),
   ])
     .then(([experts, office]) => {
-      inflight = null
+      // Only clear the shared handle if it still points at *this* request: a
+      // focus refresh may have superseded it, and nulling unconditionally would
+      // orphan the newer in-flight request and let a concurrent mount kick off a
+      // duplicate scan.
+      if (inflight === request) inflight = null
       // A newer invalidation superseded this request while it was in flight —
       // discard its result so it can't clobber the fresher snapshot.
       if (myGeneration !== generation) return cached
@@ -49,11 +53,49 @@ async function loadSnapshot(): Promise<ExpertInstallStatus[] | null> {
       return merged
     })
     .catch((err) => {
-      inflight = null
+      if (inflight === request) inflight = null
       console.warn("[useEnabledSkillIds] failed to load statuses:", err)
       return cached
     })
+  inflight = request
   return inflight
+}
+
+// Window-focus refetch is shared across all hook instances via a single
+// module-level listener + refcount. Skill links are edited in the settings
+// window, so we refresh when this window regains focus — but a per-instance
+// listener meant every mounted consumer (e.g. each conversation composer) fired
+// its own refresh on the same focus event, and because the handler clears
+// `inflight` before calling `loadSnapshot`, those N calls defeated the in-flight
+// dedup and ran N concurrent (expert + office) status scans. One coalesced
+// refresh per focus keeps the cost flat regardless of how many composers mount.
+let focusRefcount = 0
+let focusListener: (() => void) | null = null
+
+function refreshSnapshotOnFocus(): void {
+  // Force a fresh load even if one is in flight: it may have started before the
+  // settings change we just returned from. The generation bump makes any stale
+  // request discard its result instead of clobbering the fresh one. On failure
+  // the cache is kept, so a transient error never resets a good snapshot.
+  generation += 1
+  inflight = null
+  loadSnapshot()
+}
+
+function acquireFocusRefresh(): void {
+  if (typeof window === "undefined") return
+  focusRefcount += 1
+  if (focusListener) return
+  focusListener = refreshSnapshotOnFocus
+  window.addEventListener("focus", focusListener)
+}
+
+function releaseFocusRefresh(): void {
+  if (typeof window === "undefined") return
+  focusRefcount = Math.max(0, focusRefcount - 1)
+  if (focusRefcount > 0 || !focusListener) return
+  window.removeEventListener("focus", focusListener)
+  focusListener = null
 }
 
 /**
@@ -98,19 +140,14 @@ export function useEnabledSkillIds(agentType: AgentType | null): {
   }, [])
 
   // Re-fetch when the window regains focus — the settings window links/unlinks
-  // skills while this conversation window stays mounted. Bump the generation
-  // and clear the in-flight handle so a fresh request runs; the resolve
-  // notifies every subscriber (no direct setState here, so the lint rule
-  // against state-in-effect stays satisfied). On failure the cache is kept, so
-  // a transient error never resets a good snapshot.
+  // skills while this conversation window stays mounted. The listener is shared
+  // at module scope (refcounted), so N mounted consumers trigger a single
+  // coalesced refresh per focus event rather than one scan each. The refresh
+  // notifies every subscriber (no direct setState here, so the lint rule against
+  // state-in-effect stays satisfied).
   useEffect(() => {
-    const onFocus = () => {
-      generation += 1
-      inflight = null
-      loadSnapshot()
-    }
-    window.addEventListener("focus", onFocus)
-    return () => window.removeEventListener("focus", onFocus)
+    acquireFocusRefresh()
+    return () => releaseFocusRefresh()
   }, [])
 
   const enabledIds = useMemo(() => {

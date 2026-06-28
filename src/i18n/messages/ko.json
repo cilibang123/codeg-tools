@@ -2058,6 +2058,8 @@
         "slashCommands": "슬래시 명령",
         "slashSearchPlaceholder": "명령 검색...",
         "slashSearchEmpty": "일치하는 명령이 없습니다",
+        "experts": "전문가",
+        "office": "일상 업무",
         "attachLocalUpload": "로컬 파일 첨부",
         "attachServerFile": "서버 파일 첨부",
         "attachUploadTooLarge": "{names}이(가) {limit}MB 업로드 한도를 초과하여 건너뛰었습니다.",

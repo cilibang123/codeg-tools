@@ -2058,6 +2058,8 @@
         "slashCommands": "スラッシュコマンド",
         "slashSearchPlaceholder": "コマンドを検索...",
         "slashSearchEmpty": "一致するコマンドがありません",
+        "experts": "エキスパート",
+        "office": "日常業務",
         "attachLocalUpload": "ローカルファイルを添付",
         "attachServerFile": "サーバーファイルを添付",
         "attachUploadTooLarge": "{names} は {limit}MB のアップロード上限を超えたためスキップしました。",

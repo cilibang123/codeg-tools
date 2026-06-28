@@ -2058,6 +2058,8 @@
         "slashCommands": "أوامر الشرطة المائلة",
         "slashSearchPlaceholder": "البحث عن الأوامر...",
         "slashSearchEmpty": "لا توجد أوامر مطابقة",
+        "experts": "الخبراء",
+        "office": "الأعمال المكتبية",
         "attachLocalUpload": "تحميل ملف محلي",
         "attachServerFile": "اختيار ملف من الخادم",
         "attachUploadTooLarge": "{names} يتجاوز حد التحميل {limit}MB وتم تخطيه.",
