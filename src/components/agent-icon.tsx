@@ -314,9 +314,9 @@ const KimiCodeColorIcon = memo(function KimiCodeColorIcon({
 })
 
 const PiColorIcon = memo(function PiColorIcon({ size = "1em" }: IconProps) {
-  // pi's official mark (from pi-logo-on-light.svg) — rendered white on a teal
-  // squircle to match codeg's agent palette. The source paths use an 800-unit
-  // viewBox; the transform scales/centers the glyph into the 24-box.
+  // pi's official mark (from pi-logo-on-light.svg) — rendered white on a black
+  // squircle to match pi's brand. The source paths use an 800-unit viewBox; the
+  // transform scales/centers the glyph into the 24-box.
   return (
     <svg
       height={size}
@@ -326,7 +326,7 @@ const PiColorIcon = memo(function PiColorIcon({ size = "1em" }: IconProps) {
       xmlns="http://www.w3.org/2000/svg"
     >
       <title>Pi</title>
-      <rect width="24" height="24" rx="5.3" fill="#0D9488" />
+      <rect width="24" height="24" rx="5.3" fill="#000000" />
       <g fill="#FFFFFF" transform="translate(0.922 0.922) scale(0.027693)">
         <path
           fillRule="evenodd"
