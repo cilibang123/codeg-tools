@@ -34,6 +34,10 @@ import {
   languageFromPath,
 } from "@/lib/language-detect"
 import { toErrorMessage } from "@/lib/app-error"
+import {
+  HIDDEN_TAB_CONTENT_BUDGET_CHARS,
+  selectTabsToUnload,
+} from "@/lib/file-tab-memory"
 import { useWorkspaceStateStore } from "@/hooks/use-workspace-state-store"
 import {
   useOpenFileTabsWatch,
@@ -248,6 +252,16 @@ function isDirtyFileTab(tab: FileWorkspaceTab): boolean {
   return tab.kind === "file" && Boolean(tab.isDirty)
 }
 
+// Share one string instance when the git base equals the working copy —
+// the common case for files without uncommitted changes. Halves the
+// retained text per clean tracked file.
+function dedupeGitBase(
+  content: string,
+  gitBaseContent: string | undefined
+): string | undefined {
+  return gitBaseContent === content ? content : gitBaseContent
+}
+
 // Re-exported for existing consumers; the implementation lives in
 // lib/language-detect so the tab watcher can use it without a runtime
 // import cycle back into this module.
@@ -371,6 +385,9 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
   //       a superseding refresh) from clobbering the tab.
   const inFlightLoadsRef = useRef<Map<string, number>>(new Map())
   const nextLoadGenRef = useRef(0)
+  // Most-recently-active tab ids, most recent first. Drives the memory
+  // guardrail's least-recently-active eviction order.
+  const tabRecencyRef = useRef<string[]>([])
 
   useEffect(() => {
     fileTabsRef.current = fileTabs
@@ -906,7 +923,7 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
               ? {
                   ...tab,
                   content: result.content,
-                  gitBaseContent,
+                  gitBaseContent: dedupeGitBase(result.content, gitBaseContent),
                   savedContent: result.content,
                   isDirty: false,
                   etag: result.etag,
@@ -1079,7 +1096,10 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
             prev.map((tab) => {
               if (tab.id !== tabId || tab.kind !== "file") return tab
               if (tab.etag !== fetchedEtag) return tab
-              return { ...tab, gitBaseContent }
+              return {
+                ...tab,
+                gitBaseContent: dedupeGitBase(tab.content, gitBaseContent),
+              }
             })
           )
         } catch {
@@ -1243,7 +1263,7 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
               ? {
                   ...tab,
                   content: result.content,
-                  gitBaseContent,
+                  gitBaseContent: dedupeGitBase(result.content, gitBaseContent),
                   savedContent: result.content,
                   isDirty: false,
                   etag: result.etag,
@@ -2105,7 +2125,7 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
               ? {
                   ...candidate,
                   content: result.content,
-                  gitBaseContent,
+                  gitBaseContent: dedupeGitBase(result.content, gitBaseContent),
                   savedContent: result.content,
                   isDirty: false,
                   etag: result.etag,
@@ -2248,6 +2268,71 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
   )
 
   const activeFilePath = activeFileTab?.path ?? null
+
+  useEffect(() => {
+    if (!activeFileTabId) return
+    const recency = tabRecencyRef.current
+    const existingIdx = recency.indexOf(activeFileTabId)
+    if (existingIdx >= 0) recency.splice(existingIdx, 1)
+    recency.unshift(activeFileTabId)
+    // Bounded bookkeeping; anything beyond this is "long unused" anyway.
+    if (recency.length > 512) recency.length = 512
+  }, [activeFileTabId])
+
+  // Memory guardrail: once hidden clean tabs retain more text than the
+  // budget, drop the least-recently-active buffers (content + git base;
+  // metadata/etag survive) and flag them stale — activation refetches
+  // through the existing stale machinery. Dirty/loading/saving tabs are
+  // never touched. Converges in one pass: unloaded tabs hold no content,
+  // so they stop being candidates.
+  useEffect(() => {
+    const candidates = fileTabs
+      .filter(
+        (tab) =>
+          tab.kind === "file" &&
+          tab.id !== activeFileTabId &&
+          !tab.isDirty &&
+          !tab.loading &&
+          tab.saveState !== "saving" &&
+          tab.content.length > 0
+      )
+      .map((tab) => ({
+        id: tab.id,
+        charCount:
+          tab.content.length +
+          (tab.gitBaseContent && tab.gitBaseContent !== tab.content
+            ? tab.gitBaseContent.length
+            : 0),
+      }))
+    if (candidates.length === 0) return
+    const recencyRank = new Map(
+      tabRecencyRef.current.map((id, index) => [id, index])
+    )
+    const toUnload = selectTabsToUnload(
+      candidates,
+      recencyRank,
+      HIDDEN_TAB_CONTENT_BUDGET_CHARS
+    )
+    if (toUnload.size === 0) return
+
+    setFileTabs((prev) =>
+      prev.map((tab) => {
+        if (!toUnload.has(tab.id) || tab.kind !== "file") return tab
+        // Atomic re-check: a keystroke/save enqueued in the same batch
+        // must win over the eviction.
+        if (tab.isDirty || tab.loading || tab.saveState === "saving") {
+          return tab
+        }
+        return {
+          ...tab,
+          content: "",
+          savedContent: "",
+          gitBaseContent: undefined,
+          stale: true,
+        }
+      })
+    )
+  }, [fileTabs, activeFileTabId])
 
   // Once the active tab is clean and settled (e.g. the user reloaded, or a
   // successful save resolved the divergence), any conflict recorded for
