@@ -2949,14 +2949,15 @@ mod tests {
             .await
             .expect("create parent");
 
-        // Two delegation children — both should come back, oldest-first.
+        // Two delegation children — both should come back, newest-first.
+        let mut child_ids = Vec::new();
         for (i, tool_use) in ["tu-A", "tu-B"].iter().enumerate() {
             let link = DelegationLink {
                 parent_conversation_id: parent_id,
                 parent_tool_use_id: (*tool_use).into(),
                 delegation_call_id: format!("call-{i}"),
             };
-            conversation_service::create_with_delegation(
+            let child = conversation_service::create_with_delegation(
                 &db.conn,
                 folder_id,
                 AgentType::Codex,
@@ -2966,6 +2967,7 @@ mod tests {
             )
             .await
             .expect("create child");
+            child_ids.push(child.id);
         }
         // Sibling root conversation that must NOT appear.
         let _other = create_conversation_core(&db.conn, folder_id, AgentType::Gemini, None)
@@ -2977,8 +2979,14 @@ mod tests {
             .expect("list");
         assert_eq!(rows.len(), 2, "expected 2 children, got {}", rows.len());
         assert!(rows.iter().all(|r| r.parent_id == Some(parent_id)));
-        // Oldest-first ordering (created_at ascending).
-        assert!(rows[0].created_at <= rows[1].created_at);
+        // Newest-first (created_at DESC): the later-created child leads, matching
+        // the sidebar's newest-on-top sub-session ordering.
+        let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
+        assert_eq!(
+            ids,
+            vec![child_ids[1], child_ids[0]],
+            "children must be newest-first"
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────────
