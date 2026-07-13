@@ -8885,26 +8885,58 @@ wire_api = "chat"
 
     #[test]
     fn kimi_code_skill_storage_spec_targets_kimi_home() {
-        let spec =
-            skill_storage_spec(AgentType::KimiCode).expect("Kimi Code supports skills");
-        assert_eq!(spec.kind, SkillStorageKind::SkillDirectoryOnly);
-        assert_eq!(spec.project_rel_dirs, vec![".kimi-code/skills"]);
-        let expected = crate::parsers::kimi_code::resolve_kimi_code_home_dir().join("skills");
-        assert_eq!(spec.global_dirs, vec![expected]);
+        // `resolve_kimi_code_home_dir()` reads the process-wide `$HOME` (when
+        // `KIMI_CODE_HOME` is unset), and other tests mutate HOME via `temp_env`.
+        // Pin it (and clear `KIMI_CODE_HOME`) so the spec and the expected path
+        // resolve against one consistent home instead of racing a concurrent
+        // HOME-mutating test. Deriving `expected` from the same production helper
+        // keeps it correct on Windows, where `dirs::home_dir()` ignores HOME.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        temp_env::with_vars(
+            [
+                ("HOME", Some(tmp.path())),
+                ("KIMI_CODE_HOME", None::<&std::path::Path>),
+            ],
+            || {
+                let spec =
+                    skill_storage_spec(AgentType::KimiCode).expect("Kimi Code supports skills");
+                assert_eq!(spec.kind, SkillStorageKind::SkillDirectoryOnly);
+                assert_eq!(spec.project_rel_dirs, vec![".kimi-code/skills"]);
+                let expected =
+                    crate::parsers::kimi_code::resolve_kimi_code_home_dir().join("skills");
+                assert_eq!(spec.global_dirs, vec![expected]);
+            },
+        );
     }
 
     #[test]
     fn pi_skill_storage_spec_targets_pi_agent_dir() {
-        let spec = skill_storage_spec(AgentType::Pi).expect("Pi supports skills");
-        // pi's native dir accepts standalone `.md` files, like Codex.
-        assert_eq!(spec.kind, SkillStorageKind::SkillDirectoryOrMarkdownFile);
-        assert_eq!(spec.project_rel_dirs, vec![".pi/skills", ".agents/skills"]);
-        // Native pi dir first (preferred link target), shared store second.
-        let expected = vec![
-            pi_agent_dir().join("skills"),
-            home_dir_or_default().join(".agents").join("skills"),
-        ];
-        assert_eq!(spec.global_dirs, expected);
+        // `pi_agent_dir()` and `home_dir_or_default()` both read the process-wide
+        // `$HOME`, and other tests mutate HOME via `temp_env`. Pin it (and clear
+        // the BYO `PI_CODING_AGENT_DIR` override) so this test serializes against
+        // those mutators through temp_env's shared lock and reads one consistent
+        // home for both the spec and the expected paths. Deriving `expected` from
+        // the same production helpers keeps it correct on Windows, where
+        // `dirs::home_dir()` ignores the pinned HOME.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        temp_env::with_vars(
+            [
+                ("HOME", Some(tmp.path())),
+                ("PI_CODING_AGENT_DIR", None::<&std::path::Path>),
+            ],
+            || {
+                let spec = skill_storage_spec(AgentType::Pi).expect("Pi supports skills");
+                // pi's native dir accepts standalone `.md` files, like Codex.
+                assert_eq!(spec.kind, SkillStorageKind::SkillDirectoryOrMarkdownFile);
+                assert_eq!(spec.project_rel_dirs, vec![".pi/skills", ".agents/skills"]);
+                // Native pi dir first (preferred link target), shared store second.
+                let expected = vec![
+                    pi_agent_dir().join("skills"),
+                    home_dir_or_default().join(".agents").join("skills"),
+                ];
+                assert_eq!(spec.global_dirs, expected);
+            },
+        );
     }
 
     #[test]
