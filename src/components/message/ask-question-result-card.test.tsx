@@ -256,7 +256,11 @@ describe("AskQuestionResultCard", () => {
     })
     const output = JSON.stringify({
       answers: [
-        { header: "", question: "你更喜欢哪种演示方式？", selected: ["随便看看"] },
+        {
+          header: "",
+          question: "你更喜欢哪种演示方式？",
+          selected: ["随便看看"],
+        },
       ],
       declined: false,
     })
