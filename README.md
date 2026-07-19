@@ -14,9 +14,16 @@
 curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | sudo bash
 ```
 
-**macOS 桌面（安装时若 App 在运行会自动重启）**（当前登录用户，尽量不要 sudo）：
+**macOS 桌面（安装时若 App 在运行会自动重启）**（当前登录用户，**不要 sudo**）：
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | bash -s -- --desktop
+```
+
+若出现 `Permission denied`（上次误用 sudo 留下 root 目录），先收回权限再装：
+
+```bash
+sudo chown -R "$(whoami)" "$HOME/Library/Application Support/codeg-quota"
 curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | bash -s -- --desktop
 ```
 

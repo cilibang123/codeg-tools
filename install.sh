@@ -15,7 +15,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.5.3"
+VERSION="1.5.4"
 
 # ── knobs ─────────────────────────────────────────────────────────────
 OS_MODE="auto"          # auto | linux | macos | menu
@@ -507,14 +507,72 @@ PLIST
 }
 
 
+# Ensure PREFIX is writable. Common failure on macOS: previous `sudo` install
+# left root-owned files under ~/Library/Application Support/codeg-quota.
+ensure_prefix_writable() {
+  mkdir -p "$PREFIX" 2>/dev/null || true
+
+  if is_root && [[ -n "${REAL_USER:-}" && "$REAL_USER" != "root" ]]; then
+    chown -R "${REAL_USER}:staff" "$PREFIX" 2>/dev/null \
+      || chown -R "${REAL_USER}" "$PREFIX" 2>/dev/null || true
+    chmod -R u+rwX "$PREFIX" 2>/dev/null || true
+  fi
+
+  local need_fix=0
+  if [[ ! -d "$PREFIX" ]]; then
+    need_fix=1
+  elif [[ ! -w "$PREFIX" ]]; then
+    need_fix=1
+  elif [[ -e "$PREFIX/server.mjs" && ! -w "$PREFIX/server.mjs" ]]; then
+    need_fix=1
+  elif [[ -e "$PREFIX/config.json" && ! -w "$PREFIX/config.json" ]]; then
+    need_fix=1
+  fi
+
+  if [[ "$need_fix" -eq 0 ]]; then
+    return 0
+  fi
+
+  if is_root; then
+    chown -R "${REAL_USER:-$USER}:staff" "$PREFIX" 2>/dev/null \
+      || chown -R "${REAL_USER:-$USER}" "$PREFIX" 2>/dev/null || true
+    chmod -R u+rwX "$PREFIX" 2>/dev/null || true
+    mkdir -p "$PREFIX"
+    return 0
+  fi
+
+  # Non-root: cannot reclaim root-owned prefix. Print a one-liner and exit.
+  local owner=""
+  owner="$(ls -ld "$PREFIX" 2>/dev/null | awk '{print $3}' || true)"
+  warn "安装目录无写权限: $PREFIX"
+  if [[ -n "$owner" ]]; then
+    warn "当前归属用户: ${owner}（多半是上次用 sudo 安装留下的）"
+  fi
+  warn "macOS 请用当前用户安装，不要 sudo。先收回目录权限后重试："
+  die "sudo chown -R \"$(id -un)\" \"$PREFIX\" && curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | bash -s -- --desktop"
+}
+
 install_sidecar() {
   need_node
   log "install sidecar → ${PREFIX}"
-  mkdir -p "$PREFIX"
+  ensure_prefix_writable
   cp -f "$ROOT/sidecar/server.mjs" "$PREFIX/server.mjs"
   [[ -f "$ROOT/sidecar/edge-proxy.mjs" ]] && cp -f "$ROOT/sidecar/edge-proxy.mjs" "$PREFIX/edge-proxy.mjs"
   chmod 755 "$PREFIX/server.mjs" 2>/dev/null || true
+  # Keep ownership correct even when installer briefly runs as root.
+  if is_root && [[ -n "${REAL_USER:-}" && "$REAL_USER" != "root" ]]; then
+    chown "${REAL_USER}:staff" "$PREFIX/server.mjs" 2>/dev/null \
+      || chown "${REAL_USER}" "$PREFIX/server.mjs" 2>/dev/null || true
+    [[ -f "$PREFIX/edge-proxy.mjs" ]] && {
+      chown "${REAL_USER}:staff" "$PREFIX/edge-proxy.mjs" 2>/dev/null \
+        || chown "${REAL_USER}" "$PREFIX/edge-proxy.mjs" 2>/dev/null || true
+    }
+  fi
   write_sidecar_config "$BIND_HOST" "$PORT"
+  if is_root && [[ -n "${REAL_USER:-}" && "$REAL_USER" != "root" ]]; then
+    chown "${REAL_USER}:staff" "$PREFIX/config.json" 2>/dev/null \
+      || chown "${REAL_USER}" "$PREFIX/config.json" 2>/dev/null || true
+  fi
   if [[ "$TARGET_OS" == "linux" ]]; then
     install_sidecar_systemd
   else

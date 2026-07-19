@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.5.2"
+VERSION="1.5.4"
 
 OS_MODE="auto"
 RESTORE_WEB=1
