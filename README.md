@@ -99,3 +99,19 @@ curl -sS http://127.0.0.1:3080/codeg-quota/summary | head -c 200
 
 - Node.js（sidecar）
 - 可选：`codex login` / `grok login` 以拉真实额度
+
+
+## macOS 连接远程 Codeg 时的额度
+
+桌面端打开「远程工作区」窗口时，状态栏额度会**优先读取远端**的：
+
+```text
+{远程 baseUrl}/codeg-quota/summary
+```
+
+因此：
+
+1. **远端服务器**需已安装 codeg-tools（并配好 nginx/同源 `/codeg-quota`）
+2. 远程地址尽量用 **https**（Tauri 安全上下文下 http 远程可能被拦截）
+3. 本地未连远程时，仍读本机 `http://127.0.0.1:3091`
+
