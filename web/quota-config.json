@@ -1,0 +1,5 @@
+{
+  "enabled": true,
+  "apiUrl": "auto",
+  "refreshMs": 300000
+}

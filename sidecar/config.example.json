@@ -1,0 +1,50 @@
+{
+  "host": "0.0.0.0",
+  "port": 3091,
+  "cache_seconds": 180,
+  "cors_origins": ["*"],
+  "providers": [
+    {
+      "id": "claude",
+      "label": "Claude",
+      "enabled": false,
+      "type": "mock",
+      "note": "Claude Code subscription quota has no stable public remaining-API; leave disabled or use http_json against a relay dashboard you control."
+    },
+    {
+      "id": "codex",
+      "label": "Codex",
+      "enabled": true,
+      "type": "codex_cli",
+      "codex_bin": "codex",
+      "limit_id": "codex",
+      "timeout_ms": 20000,
+      "note": "Uses official Codex app-server account/rateLimits/read (same as /status)."
+    },
+    {
+      "id": "grok",
+      "label": "Grok",
+      "enabled": true,
+      "type": "grok_cli_billing",
+      "auth_path": "~/.grok/auth.json",
+      "billing_url": "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+      "timeout_ms": 12000,
+      "note": "Same source as interactive `/usage` (format=credits = weekly SuperGrok Heavy %)."
+    },
+    {
+      "id": "relay-example",
+      "label": "Relay",
+      "enabled": false,
+      "type": "http_json",
+      "url": "https://your-relay.example/api/user/self",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN"
+      },
+      "json_used": "data.used",
+      "json_limit": "data.limit",
+      "json_display": "data.display",
+      "unit": "usd",
+      "window": "month"
+    }
+  ]
+}
