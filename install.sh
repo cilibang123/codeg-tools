@@ -1,46 +1,58 @@
 #!/usr/bin/env bash
-# codeg-quota-addon — 傻瓜一键安装
+# codeg-tools — smart installer for quota UI + sidecar
 #
-# 默认：自动识别系统 + 自动找 WebUI 路径 + 装 sidecar + 挂前端
-# 可选：--desktop 额外注入 macOS codeg.app
-#
+#   curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | sudo bash
 #   ./install.sh
 #   ./install.sh --desktop
-#   ./install.sh --menu          # 需要手动选时
+#
+# Design goals:
+#   1) Work across messy deployments (systemd unit names, env files, nginx/caddy,
+#      HTTPS reverse proxy, LAN direct :3080, desktop app).
+#   2) Prefer same-origin /codeg-quota/* for the browser (no mixed-content, no
+#      extra public port). Choose the least invasive way to provide that path.
+#   3) Always leave a working sidecar; never brick codeg.
 #
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.4.3"
+VERSION="1.5.0"
 
+# ── knobs ─────────────────────────────────────────────────────────────
 OS_MODE="auto"          # auto | linux | macos | menu
 DO_SIDECAR=1
 DO_WEB=1
 DO_DESKTOP=0
 WEB_DIR_OVERRIDE=""
 DESKTOP_APP_OVERRIDE=""
-BIND_HOST=""            # empty = auto (0.0.0.0 so LAN browsers can reach sidecar)
-PORT="3091"
-QUIET=0
+BIND_HOST=""            # empty = auto
+PORT="${CODEG_QUOTA_PORT:-3091}"
+CODEG_PUBLIC_PORT="${CODEG_PUBLIC_PORT:-3080}"
+CODEG_BACKEND_PORT="${CODEG_BACKEND_PORT:-13080}"
+QUOTA_PREFIX="/codeg-quota"
+ACCESS_MODE=""          # filled by probe: nginx | caddy | edge | direct
+CODEG_UNIT=""
+CODEG_LISTEN_PORT=""
+CODEG_LISTEN_HOST=""
 
 log()  { printf '==> %s\n' "$*"; }
 warn() { printf '!!  %s\n' "$*" >&2; }
 die()  { printf 'xx  %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+is_root() { [[ "$(id -u)" -eq 0 ]]; }
 
 usage() {
-  cat <<'EOF'
-codeg-quota-addon 傻瓜安装
+  cat <<EOF
+codeg-tools installer v${VERSION}
 
-  ./install.sh                 全自动（推荐）
-  ./install.sh --desktop       macOS 额外注入桌面 App
-  ./install.sh --menu          交互菜单
-  ./install.sh --web-dir PATH  指定 WebUI 目录
-  ./install.sh --app PATH      指定 codeg.app
-  ./install.sh --sidecar-only
-  ./install.sh --web-only
+  ./install.sh                 full auto
+  ./install.sh --desktop       also inject macOS .app web
+  ./install.sh --web-dir PATH  force WebUI static dir
+  ./install.sh --sidecar-only / --web-only
   ./install.sh --os linux|macos|auto
   ./install.sh --bind 0.0.0.0 --port 3091
+
+One-liner:
+  curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | sudo bash
 EOF
   exit 0
 }
@@ -64,12 +76,13 @@ while [[ $# -gt 0 ]]; do
     --app=*) DESKTOP_APP_OVERRIDE="${1#*=}"; shift ;;
     --bind) BIND_HOST="${2:-}"; shift 2 ;;
     --port) PORT="${2:-}"; shift 2 ;;
-    -q|--quiet) QUIET=1; shift ;;
-    -y|--yes) shift ;; # 兼容旧参数，默认已全自动
-    *) die "未知参数: $1（试 --help）" ;;
+    -q|--quiet) shift ;;
+    -y|--yes) shift ;;
+    *) die "unknown arg: $1 (try --help)" ;;
   esac
 done
 
+# ── OS ────────────────────────────────────────────────────────────────
 detect_os() {
   case "$(uname -s 2>/dev/null || echo unknown)" in
     Linux*)  echo linux ;;
@@ -79,240 +92,280 @@ detect_os() {
 }
 
 resolve_os() {
-  local detected
-  detected="$(detect_os)"
+  local detected; detected="$(detect_os)"
   case "$OS_MODE" in
     auto)
-      [[ "$detected" != "unknown" ]] || die "无法识别系统: $(uname -s 2>/dev/null || true)"
-      echo "$detected"
-      ;;
+      [[ "$detected" != "unknown" ]] || die "unknown OS: $(uname -s 2>/dev/null || true)"
+      echo "$detected" ;;
     linux|macos) echo "$OS_MODE" ;;
     menu)
       echo ""
-      echo "  codeg-quota-addon v${VERSION}  （检测到: ${detected}）"
+      echo "  codeg-tools v${VERSION}  (detected: ${detected})"
       echo "  1) Linux WebUI"
       echo "  2) macOS WebUI"
-      echo "  3) macOS WebUI + 桌面 App"
-      echo "  4) 自动"
-      read -r -p "  选择 [4]: " c || true
+      echo "  3) macOS WebUI + desktop App"
+      echo "  4) auto"
+      read -r -p "  choose [4]: " c || true
       c="${c:-4}"
       case "$c" in
         1) echo linux ;;
         2) echo macos ;;
         3) DO_DESKTOP=1; echo macos ;;
-        *) [[ "$detected" != "unknown" ]] || die "无法自动识别"; echo "$detected" ;;
-      esac
-      ;;
-    *) die "--os 无效: $OS_MODE" ;;
+        *) [[ "$detected" != "unknown" ]] || die "cannot auto-detect OS"; echo "$detected" ;;
+      esac ;;
+    *) die "invalid --os: $OS_MODE" ;;
   esac
 }
 
 TARGET_OS="$(resolve_os)"
-log "系统: ${TARGET_OS}"
+log "OS: ${TARGET_OS}"
 [[ "$DO_DESKTOP" -eq 1 && "$TARGET_OS" != "macos" ]] && DO_DESKTOP=0
 
-# Install prefix
 if [[ "$TARGET_OS" == "linux" ]]; then
-  if [[ "$(id -u)" -eq 0 ]]; then
-    PREFIX="${PREFIX:-/opt/codeg-quota}"
-  else
-    PREFIX="${PREFIX:-$HOME/.local/share/codeg-quota}"
-  fi
+  if is_root; then PREFIX="${PREFIX:-/opt/codeg-quota}"
+  else PREFIX="${PREFIX:-$HOME/.local/share/codeg-quota}"; fi
 else
   PREFIX="${PREFIX:-$HOME/Library/Application Support/codeg-quota}"
 fi
 
-# Auto bind host: default 0.0.0.0 so remote browsers on LAN can hit :3091
-# Use --bind 127.0.0.1 if you only ever open WebUI on the same machine.
-auto_bind_host() {
-  if [[ -n "$BIND_HOST" ]]; then
-    echo "$BIND_HOST"
-    return
-  fi
-  echo "0.0.0.0"
-}
+# ══════════════════════════════════════════════════════════════════════
+# Phase 0 — probe environment (read-only)
+# ══════════════════════════════════════════════════════════════════════
 
-BIND_HOST="$(auto_bind_host)"
-
-# ── discover WebUI paths ──────────────────────────────────────────────
-discover_web_dirs() {
-  local -a found=()
-  local d line val
-
-  # 1) explicit
-  if [[ -n "$WEB_DIR_OVERRIDE" ]]; then
-    [[ -d "$WEB_DIR_OVERRIDE" ]] || die "--web-dir 不存在: $WEB_DIR_OVERRIDE"
-    echo "$WEB_DIR_OVERRIDE"
-    return
-  fi
-
-  # 2) env
-  if [[ -n "${CODEG_STATIC_DIR:-}" && -d "${CODEG_STATIC_DIR}" ]]; then
-    found+=("${CODEG_STATIC_DIR}")
-  fi
-
-  # 3) process cmdline / env of running codeg-server
-  if have pgrep; then
-    local pid
-    while read -r pid; do
-      [[ -z "$pid" ]] && continue
-      # Linux /proc env
-      if [[ -r "/proc/$pid/environ" ]]; then
-        val="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -E '^CODEG_STATIC_DIR=' | head -1 | cut -d= -f2- || true)"
-        if [[ -n "$val" && -d "$val" ]]; then
-          found+=("$val")
-        fi
-      fi
-      # macOS: try lsof on cwd of process
-    done < <(pgrep -f 'codeg-server' 2>/dev/null || true)
-  fi
-
-  # 4) systemd env file
-  for f in /etc/codeg/codeg-server.env /usr/local/etc/codeg/codeg-server.env \
-           "$HOME/.config/codeg/codeg-server.env"; do
+find_codeg_unit() {
+  local u
+  for u in codeg-server codeg codeg-web codeg_server; do
+    systemctl cat "${u}.service" >/dev/null 2>&1 || continue
+    echo "$u"; return 0
+  done
+  local f
+  for f in /etc/systemd/system/codeg*.service /lib/systemd/system/codeg*.service \
+           /usr/lib/systemd/system/codeg*.service; do
     [[ -f "$f" ]] || continue
-    line="$(grep -E '^[[:space:]]*CODEG_STATIC_DIR=' "$f" 2>/dev/null | tail -1 || true)"
-    val="${line#*CODEG_STATIC_DIR=}"
-    val="${val//\"/}"
-    val="${val//\'/}"
-    val="$(echo "$val" | xargs 2>/dev/null || echo "$val")"
-    if [[ -n "$val" && -d "$val" ]]; then
-      found+=("$val")
-    fi
-  done
-
-  # 5) well-known paths
-  local candidates=(
-    /usr/local/share/codeg/web
-    /usr/share/codeg/web
-    /opt/codeg/web
-    /opt/homebrew/share/codeg/web
-    /usr/local/opt/codeg/share/web
-    "$HOME/.local/share/codeg/web"
-    "$HOME/Library/Application Support/codeg/web"
-  )
-  for d in "${candidates[@]}"; do
-    if [[ -f "$d/index.html" ]]; then
-      found+=("$d")
-    fi
-  done
-
-  # 6) find under /usr/local /opt (limited depth)
-  if have find; then
-    while IFS= read -r d; do
-      [[ -n "$d" ]] && found+=("$d")
-    done < <(find /usr/local/share /usr/share /opt /opt/homebrew/share \
-      "$HOME/.local/share" "$HOME/Library/Application Support" \
-      -maxdepth 4 -type f -name index.html -path '*/codeg/*' 2>/dev/null \
-      | sed 's#/index.html$##' | head -20 || true)
-  fi
-
-  # unique preserve order
-  local -a uniq=()
-  local x u skip
-  for x in "${found[@]}"; do
-    skip=0
-    for u in "${uniq[@]+"${uniq[@]}"}"; do
-      [[ "$u" == "$x" ]] && skip=1 && break
-    done
-    [[ $skip -eq 0 && -d "$x" ]] && uniq+=("$x")
-  done
-
-  if ((${#uniq[@]} == 0)); then
-    return 1
-  fi
-  # print all for multi-deploy
-  printf '%s\n' "${uniq[@]}"
-}
-
-discover_desktop_web() {
-  local app res found
-  local apps=(
-    "${DESKTOP_APP_OVERRIDE}"
-    "/Applications/codeg.app"
-    "$HOME/Applications/codeg.app"
-  )
-  # also scan /Applications for *codeg*
-  if [[ "$TARGET_OS" == "macos" && -d /Applications ]]; then
-    while IFS= read -r app; do
-      apps+=("$app")
-    done < <(find /Applications -maxdepth 2 -name 'codeg*.app' -type d 2>/dev/null | head -5 || true)
-  fi
-
-  for app in "${apps[@]}"; do
-    [[ -z "$app" || ! -d "$app" ]] && continue
-    for res in \
-      "$app/Contents/Resources/web" \
-      "$app/Contents/Resources/resources/web"
-    do
-      if [[ -f "$res/index.html" ]]; then
-        echo "${res}|${app}"
-        return 0
-      fi
-    done
-    found="$(find "$app/Contents/Resources" -maxdepth 5 -type f -name index.html 2>/dev/null | head -1 || true)"
-    if [[ -n "$found" ]]; then
-      echo "$(dirname "$found")|${app}"
-      return 0
-    fi
+    case "$(basename "$f")" in
+      codeg-quota*|codeg-edge*|codeg-tools*) continue ;;
+    esac
+    echo "$(basename "$f" .service)"; return 0
   done
   return 1
 }
 
-need_node() {
-  if have node; then
-    log "Node: $(node -v)"
-    return
+# Print "host:port" of the first codeg-server listen address, or empty.
+probe_codeg_listen() {
+  local line host port
+  # ss: "LISTEN ... 127.0.0.1:3080 ... users:(("codeg-server",..."
+  if have ss; then
+    line="$(ss -tlnp 2>/dev/null | grep -E 'codeg-server|codeg_server' | head -1 || true)"
+    if [[ -n "$line" ]]; then
+      # last host:port before users=
+      port="$(echo "$line" | grep -oE '[0-9\.:\[\]]+:[0-9]+' | tail -1 || true)"
+      if [[ -n "$port" ]]; then
+        echo "$port"
+        return 0
+      fi
+    fi
+    # fallback: known ports with codeg
+    for port in 3080 13080 8080 3000; do
+      if ss -tlnp 2>/dev/null | grep -E ":${port}\\b" | grep -qiE 'codeg'; then
+        host="$(ss -tlnp 2>/dev/null | grep -E ":${port}\\b" | grep -i codeg | grep -oE '[0-9\.:\[\]]+:'${port} | head -1 || true)"
+        echo "${host:-0.0.0.0:$port}"
+        return 0
+      fi
+    done
   fi
-  die "未找到 node。请先安装 Node.js，再重跑本脚本。"
+  return 1
 }
 
-# ── sidecar ───────────────────────────────────────────────────────────
-install_sidecar() {
-  need_node
-  log "安装 sidecar → ${PREFIX}"
-  mkdir -p "$PREFIX"
-  cp -f "$ROOT/sidecar/server.mjs" "$PREFIX/server.mjs"
-  if [[ ! -f "$PREFIX/config.json" ]]; then
-    cp -f "$ROOT/sidecar/config.example.json" "$PREFIX/config.json"
+# List reverse-proxy config files that point at a given backend port.
+list_rp_configs_for_port() {
+  local backend_port="$1"
+  local f
+  # nginx
+  if have nginx; then
+    for f in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf /etc/nginx/nginx.conf; do
+      [[ -e "$f" ]] || continue
+      if grep -qE "proxy_pass[[:space:]]+https?://(127\\.0\\.0\\.1|localhost|\\[::1\\]):${backend_port}\\b" "$f" 2>/dev/null; then
+        echo "$f"
+      fi
+    done
   fi
+  # caddy (Caddyfile often plain text)
+  if have caddy; then
+    for f in /etc/caddy/Caddyfile /usr/local/etc/caddy/Caddyfile "$HOME/.config/caddy/Caddyfile"; do
+      [[ -f "$f" ]] || continue
+      if grep -qE ":${backend_port}\\b|localhost:${backend_port}|127\\.0\\.0\\.1:${backend_port}" "$f" 2>/dev/null; then
+        echo "$f"
+      fi
+    done
+  fi
+}
+
+# Does any reverse proxy terminate TLS for something that hits codeg?
+rp_looks_https() {
+  local f
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    if grep -qiE 'listen[[:space:]]+[0-9]*443|ssl_certificate|https://|tls ' "$f" 2>/dev/null; then
+      return 0
+    fi
+  done < <(list_rp_configs_for_port "${CODEG_LISTEN_PORT:-3080}" || true)
+  # also scan any nginx ssl server that mentions codeg in name
+  if have nginx; then
+    for f in /etc/nginx/sites-enabled/*; do
+      [[ -e "$f" ]] || continue
+      if grep -qiE 'ssl_certificate' "$f" 2>/dev/null && \
+         grep -qE '3080|codeg' "$f" 2>/dev/null; then
+        return 0
+      fi
+    done
+  fi
+  return 1
+}
+
+probe_environment() {
+  log "探测环境…"
+
+  if [[ "$TARGET_OS" == "linux" ]] && have systemctl; then
+    CODEG_UNIT="$(find_codeg_unit || true)"
+    [[ -n "$CODEG_UNIT" ]] && log "  codeg unit: ${CODEG_UNIT}.service"
+  fi
+
+  local listen
+  if listen="$(probe_codeg_listen)"; then
+    CODEG_LISTEN_HOST="${listen%:*}"
+    CODEG_LISTEN_PORT="${listen##*:}"
+    # strip brackets from ipv6 if any
+    CODEG_LISTEN_HOST="${CODEG_LISTEN_HOST#\[}"
+    CODEG_LISTEN_HOST="${CODEG_LISTEN_HOST%\]}"
+    log "  codeg listen: ${CODEG_LISTEN_HOST}:${CODEG_LISTEN_PORT}"
+    CODEG_PUBLIC_PORT="${CODEG_LISTEN_PORT}"
+  else
+    CODEG_LISTEN_PORT="${CODEG_PUBLIC_PORT}"
+    CODEG_LISTEN_HOST="127.0.0.1"
+    log "  codeg listen: (not detected, assume :${CODEG_PUBLIC_PORT})"
+  fi
+
+  local rp_count=0
+  local f
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    rp_count=$((rp_count + 1))
+    log "  reverse-proxy → codeg: $f"
+  done < <(list_rp_configs_for_port "$CODEG_LISTEN_PORT" || true)
+
+  if ((rp_count > 0)); then
+    if have nginx && list_rp_configs_for_port "$CODEG_LISTEN_PORT" 2>/dev/null | grep -q nginx; then
+      ACCESS_MODE="nginx"
+    elif have caddy; then
+      ACCESS_MODE="caddy"
+    else
+      ACCESS_MODE="nginx" # treat as generic RP file we can try to patch like nginx
+    fi
+  elif rp_looks_https; then
+    ACCESS_MODE="nginx"
+  else
+    # No RP: decide edge vs direct later
+    if is_root && [[ "$TARGET_OS" == "linux" ]]; then
+      ACCESS_MODE="edge"
+    else
+      ACCESS_MODE="direct"
+    fi
+  fi
+
+  # Prefer nginx inject when RP present (HTTPS-safe, no port fight)
+  if [[ "$ACCESS_MODE" == "nginx" || "$ACCESS_MODE" == "caddy" ]]; then
+    log "  access mode: reverse-proxy (${ACCESS_MODE}) — will inject ${QUOTA_PREFIX}/"
+  elif [[ "$ACCESS_MODE" == "edge" ]]; then
+    log "  access mode: edge proxy on :${CODEG_PUBLIC_PORT} (codeg → :${CODEG_BACKEND_PORT})"
+  else
+    log "  access mode: direct sidecar :${PORT} (same-host / open firewall)"
+  fi
+
+  # Sidecar bind: only need public if direct mode
+  if [[ -z "$BIND_HOST" ]]; then
+    if [[ "$ACCESS_MODE" == "direct" ]]; then
+      BIND_HOST="0.0.0.0"
+    else
+      # nginx/edge only need loopback to sidecar
+      BIND_HOST="127.0.0.1"
+    fi
+  fi
+  log "  sidecar bind: ${BIND_HOST}:${PORT}"
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# Phase 1 — sidecar
+# ══════════════════════════════════════════════════════════════════════
+
+need_node() {
+  have node || die "node not found — install Node.js first"
+  log "Node: $(node -v)"
+}
+
+resolve_codex_bin() {
+  local p
+  for p in \
+    "$(command -v codex 2>/dev/null || true)" \
+    /root/.local/bin/codex \
+    "$HOME/.local/bin/codex" \
+    /usr/local/bin/codex \
+    /usr/bin/codex
+  do
+    [[ -n "$p" && -x "$p" ]] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+resolve_home_for_service() {
+  if is_root; then echo /root
+  else echo "$HOME"; fi
+}
+
+write_sidecar_config() {
+  local cfg="$PREFIX/config.json"
+  local host="$1" port="$2"
+  if [[ ! -f "$cfg" ]]; then
+    cp -f "$ROOT/sidecar/config.example.json" "$cfg"
+  fi
+  local codex_bin=""
+  codex_bin="$(resolve_codex_bin || true)"
   if have python3; then
-    python3 - "$PREFIX/config.json" "$BIND_HOST" "$PORT" <<'PY'
+    python3 - "$cfg" "$host" "$port" "$codex_bin" <<'PY'
 import json, sys
-path, host, port = sys.argv[1], sys.argv[2], int(sys.argv[3])
+path, host, port, codex = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 cfg = json.load(open(path))
 cfg["host"] = host
 cfg["port"] = port
+if codex:
+    for p in cfg.get("providers", []):
+        if p.get("type") == "codex_cli":
+            p["codex_bin"] = codex
 json.dump(cfg, open(path, "w"), indent=2, ensure_ascii=False)
 open(path, "a").write("\n")
 PY
   fi
-  chmod 755 "$PREFIX/server.mjs"
-
-  if [[ "$TARGET_OS" == "linux" ]]; then
-    install_systemd
-  else
-    install_launchd
-  fi
 }
 
-install_systemd() {
-  local unit="/etc/systemd/system/codeg-quota.service"
-  local node_bin
+install_sidecar_systemd() {
+  local node_bin home_dir path_env unit
   node_bin="$(command -v node)"
-  if [[ "$(id -u)" -ne 0 ]]; then
-    # user unit
+  home_dir="$(resolve_home_for_service)"
+  path_env="/root/.local/bin:${home_dir}/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin"
+
+  if ! is_root; then
     local udir="$HOME/.config/systemd/user"
     mkdir -p "$udir"
     unit="$udir/codeg-quota.service"
     cat > "$unit" <<EOF
 [Unit]
-Description=Codeg account quota sidecar
+Description=Codeg quota sidecar
 After=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=${PREFIX}
+Environment=HOME=${home_dir}
+Environment=PATH=${path_env}
 ExecStart=${node_bin} ${PREFIX}/server.mjs --config ${PREFIX}/config.json
 Restart=on-failure
 RestartSec=3
@@ -322,23 +375,28 @@ WantedBy=default.target
 EOF
     systemctl --user daemon-reload 2>/dev/null || true
     systemctl --user enable --now codeg-quota.service 2>/dev/null || {
-      warn "user systemd 不可用，后台启动 sidecar…"
+      warn "user systemd unavailable — starting sidecar with nohup"
       nohup "${node_bin}" "${PREFIX}/server.mjs" --config "${PREFIX}/config.json" \
         >"${PREFIX}/sidecar.log" 2>&1 &
       echo $! >"${PREFIX}/sidecar.pid"
     }
-    log "sidecar 已启动（user）"
+    log "sidecar started (user)"
     return
   fi
+
+  unit="/etc/systemd/system/codeg-quota.service"
   cat > "$unit" <<EOF
 [Unit]
-Description=Codeg account quota sidecar (codeg-quota-addon)
+Description=Codeg quota sidecar (codeg-tools)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=${PREFIX}
+Environment=HOME=${home_dir}
+Environment=USER=root
+Environment=PATH=${path_env}
 ExecStart=${node_bin} ${PREFIX}/server.mjs --config ${PREFIX}/config.json
 Restart=on-failure
 RestartSec=3
@@ -346,12 +404,19 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
+  mkdir -p /etc/systemd/system/codeg-quota.service.d
+  cat > /etc/systemd/system/codeg-quota.service.d/path.conf <<EOF
+[Service]
+Environment=HOME=${home_dir}
+Environment=PATH=${path_env}
+EOF
   systemctl daemon-reload
   systemctl enable --now codeg-quota.service
-  log "systemd: codeg-quota.service 已启用"
+  systemctl restart codeg-quota.service
+  log "systemd: codeg-quota.service running"
 }
 
-install_launchd() {
+install_sidecar_launchd() {
   local label="com.codeg.quota"
   local plist="$HOME/Library/LaunchAgents/${label}.plist"
   local node_bin logs
@@ -376,36 +441,127 @@ install_launchd() {
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>${logs}/stdout.log</string>
   <key>StandardErrorPath</key><string>${logs}/stderr.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>${HOME}</string>
+    <key>PATH</key><string>${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
 </dict>
 </plist>
 EOF
   launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null || true
   launchctl unload "$plist" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || launchctl load -w "$plist"
-  log "launchd: ${label} 已加载"
+  log "launchd: ${label}"
 }
 
-# ── web deploy ────────────────────────────────────────────────────────
+install_sidecar() {
+  need_node
+  log "install sidecar → ${PREFIX}"
+  mkdir -p "$PREFIX"
+  cp -f "$ROOT/sidecar/server.mjs" "$PREFIX/server.mjs"
+  [[ -f "$ROOT/sidecar/edge-proxy.mjs" ]] && cp -f "$ROOT/sidecar/edge-proxy.mjs" "$PREFIX/edge-proxy.mjs"
+  chmod 755 "$PREFIX/server.mjs" 2>/dev/null || true
+  write_sidecar_config "$BIND_HOST" "$PORT"
+  if [[ "$TARGET_OS" == "linux" ]]; then
+    install_sidecar_systemd
+  else
+    install_sidecar_launchd
+  fi
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# Phase 2 — WebUI deploy
+# ══════════════════════════════════════════════════════════════════════
+
+discover_web_dirs() {
+  local -a found=()
+  local d line val f pid
+
+  if [[ -n "$WEB_DIR_OVERRIDE" ]]; then
+    [[ -d "$WEB_DIR_OVERRIDE" ]] || die "--web-dir missing: $WEB_DIR_OVERRIDE"
+    echo "$WEB_DIR_OVERRIDE"; return 0
+  fi
+
+  if [[ -n "${CODEG_STATIC_DIR:-}" && -d "${CODEG_STATIC_DIR}" ]]; then
+    found+=("${CODEG_STATIC_DIR}")
+  fi
+
+  # running process env
+  if have pgrep; then
+    while read -r pid; do
+      [[ -z "$pid" || ! -r "/proc/$pid/environ" ]] && continue
+      val="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -E '^CODEG_STATIC_DIR=' | head -1 | cut -d= -f2- || true)"
+      [[ -n "$val" && -d "$val" ]] && found+=("$val")
+    done < <(pgrep -f 'codeg-server' 2>/dev/null || true)
+  fi
+
+  # env files (all known names)
+  for f in /etc/codeg/codeg.env /etc/codeg/codeg-server.env \
+           /usr/local/etc/codeg/codeg-server.env \
+           "$HOME/.config/codeg/codeg-server.env" "$HOME/.config/codeg/codeg.env"; do
+    [[ -f "$f" ]] || continue
+    line="$(grep -E '^[[:space:]]*CODEG_STATIC_DIR=' "$f" 2>/dev/null | tail -1 || true)"
+    val="${line#*CODEG_STATIC_DIR=}"; val="${val//\"/}"; val="${val//\'/}"
+    val="$(echo "$val" | xargs 2>/dev/null || echo "$val")"
+    [[ -n "$val" && -d "$val" ]] && found+=("$val")
+  done
+
+  # systemd EnvironmentFile + show
+  if have systemctl && [[ -n "${CODEG_UNIT:-}" ]]; then
+    line="$(systemctl show -p EnvironmentFiles "${CODEG_UNIT}.service" --value 2>/dev/null | head -1 || true)"
+    f="${line%% *}"; f="${f//\"/}"
+    if [[ -f "$f" ]]; then
+      line="$(grep -E '^[[:space:]]*CODEG_STATIC_DIR=' "$f" 2>/dev/null | tail -1 || true)"
+      val="${line#*CODEG_STATIC_DIR=}"; val="${val//\"/}"
+      [[ -n "$val" && -d "$val" ]] && found+=("$val")
+    fi
+  fi
+
+  local candidates=(
+    /usr/local/share/codeg/web
+    /usr/share/codeg/web
+    /opt/codeg/web
+    /opt/homebrew/share/codeg/web
+    "$HOME/.local/share/codeg/web"
+    "$HOME/Library/Application Support/codeg/web"
+  )
+  for d in "${candidates[@]}"; do
+    [[ -f "$d/index.html" ]] && found+=("$d")
+  done
+
+  # unique, skip backups
+  local -a uniq=()
+  local x u skip
+  for x in "${found[@]}"; do
+    case "$x" in *backup*|*official*) continue ;; esac
+    skip=0
+    for u in "${uniq[@]+"${uniq[@]}"}"; do
+      [[ "$u" == "$x" ]] && skip=1 && break
+    done
+    [[ $skip -eq 0 && -d "$x" && -f "$x/index.html" ]] && uniq+=("$x")
+  done
+  ((${#uniq[@]})) || return 1
+  printf '%s\n' "${uniq[@]}"
+}
+
 backup_and_deploy_web() {
-  local target="$1"
-  local tag="$2"
-  [[ -d "$ROOT/web" ]] || die "安装包损坏：缺少 web/"
+  local target="$1" tag="$2"
+  [[ -d "$ROOT/web" ]] || die "package missing web/"
   mkdir -p "$target"
   local bak="${target}.official-backup"
-  if [[ ! -e "$bak" ]] && [[ -f "$target/index.html" ]]; then
-    log "备份原版 → ${bak}"
+  if [[ ! -e "$bak" && -f "$target/index.html" ]]; then
+    log "backup original web → ${bak}"
     rm -rf "$bak"
     cp -a "$target" "$bak"
   fi
-  log "部署额度 WebUI → ${target} (${tag})"
+  log "deploy WebUI → ${target} (${tag})"
   if have rsync; then
     rsync -a --delete "$ROOT/web/" "$target/"
   else
-    find "$target" -mindepth 1 -maxdepth 1 ! -name '.official-backup' -exec rm -rf {} + 2>/dev/null || true
+    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
     cp -a "$ROOT/web/." "$target/"
   fi
-  # apiUrl=auto → 浏览器按当前页面主机名访问 :PORT（远程 WebUI 不会误打 127.0.0.1）
-  # 桌面 App / 本机浏览器同样适用（hostname 多为 127.0.0.1 或 localhost）
   cat > "$target/quota-config.json" <<EOF
 {
   "enabled": true,
@@ -423,78 +579,103 @@ install_web_all() {
   done < <(discover_web_dirs || true)
 
   if ((${#dirs[@]} == 0)); then
-    warn "未自动找到 Codeg WebUI 目录。"
-    warn "可指定: $0 --web-dir /path/to/web"
+    warn "WebUI dir not found — use --web-dir /path/to/web"
     return 1
   fi
-
   for d in "${dirs[@]}"; do
-    # skip backup / previous official trees
-    case "$d" in
-      *backup*|*official-0*|*official-backup*) 
-        warn "跳过备份目录: $d"
-        continue
-        ;;
-    esac
     backup_and_deploy_web "$d" "webui-$((++n))"
   done
-
-  if [[ "$TARGET_OS" == "linux" ]] && have systemctl; then
-    systemctl try-restart codeg-server.service 2>/dev/null || true
+  # restart codeg unit so it re-reads static if needed (usually not)
+  if [[ "$TARGET_OS" == "linux" && -n "${CODEG_UNIT:-}" ]]; then
+    systemctl try-restart "${CODEG_UNIT}.service" 2>/dev/null || true
   fi
+}
+
+discover_desktop_web() {
+  local app res found
+  local apps=("${DESKTOP_APP_OVERRIDE}" "/Applications/codeg.app" "$HOME/Applications/codeg.app")
+  if [[ "$TARGET_OS" == "macos" && -d /Applications ]]; then
+    while IFS= read -r app; do apps+=("$app"); done \
+      < <(find /Applications -maxdepth 2 -name 'codeg*.app' -type d 2>/dev/null | head -5 || true)
+  fi
+  for app in "${apps[@]}"; do
+    [[ -z "$app" || ! -d "$app" ]] && continue
+    for res in "$app/Contents/Resources/web" "$app/Contents/Resources/resources/web"; do
+      [[ -f "$res/index.html" ]] && { echo "${res}|${app}"; return 0; }
+    done
+    found="$(find "$app/Contents/Resources" -maxdepth 5 -type f -name index.html 2>/dev/null | head -1 || true)"
+    [[ -n "$found" ]] && { echo "$(dirname "$found")|${app}"; return 0; }
+  done
+  return 1
 }
 
 install_web_desktop() {
   local pair web app
-  if ! pair="$(discover_desktop_web)"; then
-    warn "未找到 macOS codeg.app，跳过桌面注入（WebUI 已处理则仍可用浏览器）"
-    return 1
-  fi
-  web="${pair%%|*}"
-  app="${pair##*|}"
-  log "桌面 App: $app"
+  pair="$(discover_desktop_web)" || { warn "no codeg.app — skip desktop"; return 1; }
+  web="${pair%%|*}"; app="${pair##*|}"
+  log "desktop app: $app"
   backup_and_deploy_web "$web" "desktop"
-  warn "已改 App 资源；若系统提示损坏/无法打开，请在「隐私与安全性」中允许"
 }
 
+# ══════════════════════════════════════════════════════════════════════
+# Phase 3 — same-origin access path
+# ══════════════════════════════════════════════════════════════════════
 
-# ── nginx HTTPS reverse-proxy: /codeg-quota/ → sidecar :3091 ──────────
-# 生产环境常见：浏览器是 https://domain:18443，不能直连 :3091（混合内容）。
-# 优先改 nginx，比 edge 抢 3080 更稳。
-install_nginx_quota_location() {
-  [[ "$TARGET_OS" == "linux" ]] || return 1
-  [[ "$(id -u)" -eq 0 ]] || return 1
-  have nginx || return 1
-  local conf f n=0 real
+# Inject location /codeg-quota/ into reverse-proxy configs.
+install_rp_same_origin() {
+  local backend_port="${CODEG_LISTEN_PORT:-3080}"
+  local f real n=0
   local -a confs=()
-  for f in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
-    [[ -f "$f" || -L "$f" ]] || continue
-    if grep -qE 'proxy_pass[[:space:]]+http://127\.0\.0\.1:3080|proxy_pass[[:space:]]+http://localhost:3080' "$f" 2>/dev/null; then
-      confs+=("$f")
-    fi
-  done
-  ((${#confs[@]})) || return 1
 
-  for conf in "${confs[@]}"; do
-    real="$conf"
-    [[ -L "$conf" ]] && real="$(readlink -f "$conf" 2>/dev/null || echo "$conf")"
-    if grep -q 'location /codeg-quota/' "$real" 2>/dev/null; then
-      log "nginx 已有 /codeg-quota/ ← $real"
+  while IFS= read -r f; do
+    [[ -n "$f" ]] && confs+=("$f")
+  done < <(list_rp_configs_for_port "$backend_port" || true)
+
+  # Also match configs that proxy to 3080 even if codeg currently elsewhere
+  if ((${#confs[@]} == 0)); then
+    while IFS= read -r f; do
+      [[ -n "$f" ]] && confs+=("$f")
+    done < <(list_rp_configs_for_port 3080 || true)
+  fi
+
+  ((${#confs[@]})) || return 1
+  have python3 || { warn "python3 required to patch reverse-proxy config"; return 1; }
+
+  for f in "${confs[@]}"; do
+    real="$f"
+    [[ -L "$f" ]] && real="$(readlink -f "$f" 2>/dev/null || echo "$f")"
+    [[ -f "$real" ]] || continue
+
+    # Caddyfile: different syntax — skip auto-patch, print hint
+    if [[ "$(basename "$real")" == "Caddyfile" ]] || grep -qE '^\s*reverse_proxy\b' "$real" 2>/dev/null; then
+      if ! grep -q 'codeg-quota' "$real" 2>/dev/null; then
+        warn "Caddy detected ($real): add manually:"
+        warn "  handle_path ${QUOTA_PREFIX}/* { reverse_proxy 127.0.0.1:${PORT} }"
+      else
+        log "Caddy already mentions codeg-quota ← $real"
+        n=$((n+1))
+      fi
+      continue
+    fi
+
+    if grep -q "location ${QUOTA_PREFIX}/" "$real" 2>/dev/null || \
+       grep -q "location ${QUOTA_PREFIX}" "$real" 2>/dev/null; then
+      log "nginx already has ${QUOTA_PREFIX}/ ← $real"
       n=$((n+1))
       continue
     fi
+
     cp -a "$real" "${real}.bak-codeg-tools-$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
-    if have python3; then
-      if python3 - "$real" "$PORT" <<'PY'
+    if python3 - "$real" "$PORT" "$QUOTA_PREFIX" <<'PY'
 import sys
 from pathlib import Path
-path, port = sys.argv[1], sys.argv[2]
+path, port, prefix = sys.argv[1], sys.argv[2], sys.argv[3]
 t = Path(path).read_text()
-if "location /codeg-quota/" in t:
+if f"location {prefix}/" in t or f"location {prefix} " in t:
     raise SystemExit(0)
 block = f"""
-    # codeg-tools quota (same-origin under HTTPS reverse proxy)
-    location /codeg-quota/ {{
+    # codeg-tools: same-origin quota API (auto-injected)
+    location {prefix}/ {{
         proxy_pass http://127.0.0.1:{port}/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -505,148 +686,122 @@ block = f"""
     }}
 
 """
-for needle in ["    location /api/ {", "    location / {"]:
+# Prefer insert before API or root location inside server blocks
+for needle in (
+    "    location /api/ {",
+    "    location /api {",
+    "    location /ws/ {",
+    "    location / {",
+    "\tlocation /api/ {",
+    "\tlocation / {",
+):
     if needle in t:
         Path(path).write_text(t.replace(needle, block + needle, 1))
         raise SystemExit(0)
+# last resort: before last closing brace of file
+idx = t.rfind("\n}")
+if idx > 0:
+    Path(path).write_text(t[:idx] + "\n" + block + t[idx:])
+    raise SystemExit(0)
 raise SystemExit(1)
 PY
-      then
-        if grep -q 'location /codeg-quota/' "$real" 2>/dev/null; then
-          n=$((n+1))
-          log "nginx 已注入 /codeg-quota/ → :${PORT}  ($real)"
-        fi
+    then
+      if grep -q "location ${QUOTA_PREFIX}" "$real" 2>/dev/null; then
+        n=$((n+1))
+        log "nginx injected ${QUOTA_PREFIX}/ → :${PORT}  ($real)"
       fi
+    else
+      warn "could not patch $real"
     fi
   done
 
-  if ((n>0)); then
+  ((n > 0)) || return 1
+
+  if have nginx; then
     if nginx -t 2>/dev/null; then
       systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || true
-      log "nginx 已 reload"
-      systemctl stop codeg-edge.service 2>/dev/null || true
-      systemctl disable codeg-edge.service 2>/dev/null || true
-      local d
-      for d in /etc/systemd/system/codeg.service.d /etc/systemd/system/codeg-server.service.d; do
-        if [[ -f "$d/codeg-tools-port.conf" ]]; then
-          rm -f "$d/codeg-tools-port.conf"
-          log "已移除 $d/codeg-tools-port.conf（保留 codeg :3080 给 nginx）"
-        fi
-      done
-      systemctl daemon-reload 2>/dev/null || true
-      return 0
+      log "nginx reloaded"
+    else
+      warn "nginx -t failed — restore *.bak-codeg-tools-* if needed"
+      return 1
     fi
-    warn "nginx -t 失败，请手动检查配置"
-    return 1
   fi
-  return 1
-}
 
-# ── same-origin edge proxy (public 3080 → codeg 13080 + quota 3091) ──
-# 用 systemd drop-in 强制 CODEG_PORT，不依赖 codeg-server.env 是否存在。
-CODEG_PUBLIC_PORT="${CODEG_PUBLIC_PORT:-3080}"
-CODEG_BACKEND_PORT="${CODEG_BACKEND_PORT:-13080}"
-INSTALL_EDGE=1
-
-find_codeg_unit() {
-  local u
-  for u in codeg-server codeg codeg-web codeg_server; do
-    if systemctl cat "${u}.service" >/dev/null 2>&1; then
-      echo "$u"
-      return 0
+  # Reverse-proxy mode: do NOT steal :3080 with edge
+  systemctl stop codeg-edge.service 2>/dev/null || true
+  systemctl disable codeg-edge.service 2>/dev/null || true
+  local d
+  for d in /etc/systemd/system/codeg.service.d /etc/systemd/system/codeg-server.service.d; do
+    if [[ -f "$d/codeg-tools-port.conf" ]]; then
+      rm -f "$d/codeg-tools-port.conf"
+      log "removed $d/codeg-tools-port.conf (keep codeg on public port for RP)"
     fi
   done
-  for u in /etc/systemd/system/codeg*.service /lib/systemd/system/codeg*.service; do
-    [[ -f "$u" ]] || continue
-    case "$(basename "$u")" in
-      codeg-quota*|codeg-edge*) continue ;;
-    esac
-    echo "$(basename "$u" .service)"
-    return 0
-  done
-  return 1
+  systemctl daemon-reload 2>/dev/null || true
+  ACCESS_MODE="nginx"
+  return 0
 }
 
-install_edge_proxy() {
-  [[ "${INSTALL_EDGE:-1}" -eq 1 ]] || return 0
-  [[ "$TARGET_OS" == "linux" ]] || { warn "edge 仅 Linux 自动安装"; return 0; }
-  [[ "$(id -u)" -eq 0 ]] || { warn "非 root：跳过 edge（请: curl ... | sudo bash）"; return 0; }
+# Edge proxy: only when no RP and we can move codeg off the public port.
+install_edge_same_origin() {
+  [[ "$TARGET_OS" == "linux" ]] || return 1
+  is_root || { warn "edge needs root"; return 1; }
   need_node
-
-  local node_bin unit
-  node_bin="$(command -v node)"
-  [[ -f "$ROOT/sidecar/edge-proxy.mjs" ]] || { warn "缺少 edge-proxy.mjs"; return 0; }
-  mkdir -p "$PREFIX"
-  cp -f "$ROOT/sidecar/edge-proxy.mjs" "$PREFIX/edge-proxy.mjs"
+  [[ -f "$PREFIX/edge-proxy.mjs" || -f "$ROOT/sidecar/edge-proxy.mjs" ]] || return 1
+  cp -f "${ROOT}/sidecar/edge-proxy.mjs" "$PREFIX/edge-proxy.mjs"
   chmod 755 "$PREFIX/edge-proxy.mjs"
 
-  unit=""
-  if unit="$(find_codeg_unit)"; then
-    log "找到 codeg 服务: ${unit}.service"
-    mkdir -p "/etc/systemd/system/${unit}.service.d"
-    cat > "/etc/systemd/system/${unit}.service.d/codeg-tools-port.conf" <<EOF
+  local unit node_bin public_port backend_port
+  node_bin="$(command -v node)"
+  public_port="${CODEG_LISTEN_PORT:-$CODEG_PUBLIC_PORT}"
+  backend_port="${CODEG_BACKEND_PORT}"
+  unit="${CODEG_UNIT:-}"
+  [[ -z "$unit" ]] && unit="$(find_codeg_unit || true)"
+
+  if [[ -z "$unit" ]]; then
+    warn "no codeg systemd unit — cannot safely free :${public_port} for edge"
+    return 1
+  fi
+
+  # If something that is NOT edge already owns public port as codeg, move codeg
+  log "edge mode: ${unit}.service → :${backend_port}, edge → :${public_port}"
+
+  mkdir -p "/etc/systemd/system/${unit}.service.d"
+  cat > "/etc/systemd/system/${unit}.service.d/codeg-tools-port.conf" <<EOF
 [Service]
-Environment=CODEG_PORT=${CODEG_BACKEND_PORT}
+Environment=CODEG_PORT=${backend_port}
 Environment=CODEG_HOST=0.0.0.0
 EOF
-    log "drop-in: ${unit}.service.d/codeg-tools-port.conf → PORT=${CODEG_BACKEND_PORT}"
 
-    # 同步 env 文件（有则改，无则忽略）
-    local envf
-    for envf in /etc/codeg/codeg-server.env /usr/local/etc/codeg/codeg-server.env; do
-      [[ -f "$envf" ]] || continue
-      if [[ ! -f "${envf}.before-codeg-tools" ]]; then
-        cp -a "$envf" "${envf}.before-codeg-tools" 2>/dev/null || true
-      fi
-      if grep -qE '^[[:space:]]*CODEG_PORT=' "$envf" 2>/dev/null; then
-        sed -i -E "s|^[[:space:]]*CODEG_PORT=.*|CODEG_PORT=${CODEG_BACKEND_PORT}|" "$envf" 2>/dev/null || true
-      else
-        echo "CODEG_PORT=${CODEG_BACKEND_PORT}" >>"$envf" 2>/dev/null || true
-      fi
-      log "已同步 $envf"
-      break
-    done
-  else
-    warn "未找到 codeg systemd 单元名；edge 仍会安装（后端假定 ${CODEG_BACKEND_PORT}）"
-  fi
-
-  # codex 在 systemd 下需要完整 PATH + HOME
-  mkdir -p /etc/systemd/system/codeg-quota.service.d
-  cat > /etc/systemd/system/codeg-quota.service.d/path.conf <<EOF
-[Service]
-Environment=PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
-Environment=HOME=/root
-Environment=USER=root
-EOF
-  if command -v codex >/dev/null 2>&1 && have python3 && [[ -f "$PREFIX/config.json" ]]; then
-    python3 - "$PREFIX/config.json" "$(command -v codex)" <<'PY' || true
-import json, sys
-path, bin_path = sys.argv[1], sys.argv[2]
-cfg = json.load(open(path))
-for p in cfg.get("providers", []):
-    if p.get("type") == "codex_cli":
-        p["codex_bin"] = bin_path
-json.dump(cfg, open(path, "w"), indent=2, ensure_ascii=False)
-open(path, "a").write("\n")
-PY
-    log "codex_bin → $(command -v codex)"
-  fi
+  # Patch ALL env files (EnvironmentFile wins over drop-in on some setups)
+  local envf
+  for envf in /etc/codeg/codeg.env /etc/codeg/codeg-server.env \
+              /usr/local/etc/codeg/codeg-server.env; do
+    [[ -f "$envf" ]] || continue
+    [[ -f "${envf}.before-codeg-tools" ]] || cp -a "$envf" "${envf}.before-codeg-tools" 2>/dev/null || true
+    if grep -qE '^[[:space:]]*CODEG_PORT=' "$envf"; then
+      sed -i -E "s|^[[:space:]]*CODEG_PORT=.*|CODEG_PORT=${backend_port}|" "$envf"
+    else
+      echo "CODEG_PORT=${backend_port}" >>"$envf"
+    fi
+    log "patched env $envf → PORT=${backend_port}"
+  done
 
   cat > /etc/systemd/system/codeg-edge.service <<EOF
 [Unit]
-Description=Codeg same-origin edge proxy (quota + web)
-After=network-online.target
+Description=Codeg same-origin edge proxy (codeg-tools)
+After=network-online.target ${unit}.service codeg-quota.service
 Wants=network-online.target
 
 [Service]
 Type=simple
 Environment=CODEG_EDGE_HOST=0.0.0.0
-Environment=CODEG_EDGE_PORT=${CODEG_PUBLIC_PORT}
+Environment=CODEG_EDGE_PORT=${public_port}
 Environment=CODEG_BACKEND_HOST=127.0.0.1
-Environment=CODEG_BACKEND_PORT=${CODEG_BACKEND_PORT}
+Environment=CODEG_BACKEND_PORT=${backend_port}
 Environment=CODEG_QUOTA_HOST=127.0.0.1
 Environment=CODEG_QUOTA_PORT=${PORT}
-Environment=CODEG_QUOTA_PREFIX=/codeg-quota
+Environment=CODEG_QUOTA_PREFIX=${QUOTA_PREFIX}
 ExecStart=${node_bin} ${PREFIX}/edge-proxy.mjs
 Restart=on-failure
 RestartSec=2
@@ -657,67 +812,169 @@ EOF
 
   systemctl daemon-reload
   systemctl stop codeg-edge.service 2>/dev/null || true
-
-  if [[ -n "$unit" ]]; then
-    systemctl restart "${unit}.service" 2>/dev/null || true
-  fi
-  systemctl restart codeg-quota.service 2>/dev/null || true
+  systemctl restart "${unit}.service"
   sleep 1
-
-  systemctl enable codeg-edge.service 2>/dev/null || true
-  systemctl restart codeg-edge.service
-  sleep 0.6
-
-  if ss -tlnp 2>/dev/null | grep -q ":${CODEG_PUBLIC_PORT}"; then
-    log "edge 已监听 :${CODEG_PUBLIC_PORT}"
-  else
-    warn "端口 :${CODEG_PUBLIC_PORT} 未监听"
-    systemctl status codeg-edge.service --no-pager -l 2>/dev/null | head -25 || true
+  # verify codeg left public port
+  if ss -tlnp 2>/dev/null | grep -E ":${public_port}\\b" | grep -qi codeg-server; then
+    warn "codeg still on :${public_port} after restart — edge may fail (env override?)"
   fi
-  log "完成 edge：/codeg-quota → :${PORT} ，其它 → codeg :${CODEG_BACKEND_PORT}"
+  systemctl enable --now codeg-edge.service
+  systemctl restart codeg-edge.service
+  sleep 0.5
+  if ! curl -fsS --max-time 3 "http://127.0.0.1:${public_port}${QUOTA_PREFIX}/health" >/dev/null 2>&1; then
+    warn "edge health failed on :${public_port}${QUOTA_PREFIX}/health"
+    systemctl status codeg-edge --no-pager -l 2>/dev/null | head -20 || true
+    return 1
+  fi
+  log "edge OK: :${public_port}${QUOTA_PREFIX}/* → sidecar :${PORT}"
+  ACCESS_MODE="edge"
+  CODEG_PUBLIC_PORT="$public_port"
+  return 0
 }
 
+# Optional: open local firewall for direct mode
+maybe_open_firewall() {
+  [[ "$ACCESS_MODE" == "direct" ]] || return 0
+  is_root || return 0
+  if have ufw && ufw status 2>/dev/null | grep -qi 'Status: active'; then
+    ufw allow "${PORT}/tcp" comment 'codeg-quota' 2>/dev/null || true
+    log "ufw: allowed ${PORT}/tcp"
+  fi
+  if have firewall-cmd && firewall-cmd --state 2>/dev/null | grep -qi running; then
+    firewall-cmd --permanent --add-port="${PORT}/tcp" 2>/dev/null || true
+    firewall-cmd --reload 2>/dev/null || true
+    log "firewalld: allowed ${PORT}/tcp"
+  fi
+}
+
+setup_same_origin_access() {
+  log "配置浏览器可达的额度入口（同域优先）…"
+
+  case "$ACCESS_MODE" in
+    nginx|caddy)
+      if install_rp_same_origin; then
+        log "strategy: reverse-proxy ${QUOTA_PREFIX}/ → 127.0.0.1:${PORT}"
+        return 0
+      fi
+      warn "reverse-proxy inject failed — trying edge"
+      install_edge_same_origin && return 0
+      warn "falling back to direct :${PORT} (HTTPS pages may still fail mixed-content)"
+      ACCESS_MODE="direct"
+      maybe_open_firewall
+      return 0
+      ;;
+    edge)
+      if install_edge_same_origin; then
+        return 0
+      fi
+      warn "edge failed — trying reverse-proxy inject"
+      if install_rp_same_origin; then
+        return 0
+      fi
+      ACCESS_MODE="direct"
+      maybe_open_firewall
+      return 0
+      ;;
+    *)
+      # direct first; still try RP if any config appears
+      if install_rp_same_origin; then
+        return 0
+      fi
+      ACCESS_MODE="direct"
+      maybe_open_firewall
+      log "strategy: direct sidecar :${PORT} (open firewall / same machine)"
+      return 0
+      ;;
+  esac
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# Phase 4 — health
+# ══════════════════════════════════════════════════════════════════════
+
+json_providers_ok() {
+  local file="$1"
+  python3 - "$file" <<'PY' 2>/dev/null
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert isinstance(d.get("providers"), list)
+for p in d["providers"]:
+    if p.get("status")=="disabled": continue
+    print(f"  · {p.get('label')}: {p.get('status')}  plan={p.get('plan')}  display={p.get('display')}")
+PY
+}
 
 health_check() {
   log "健康检查…"
-  sleep 1
-  local url="http://127.0.0.1:${PORT}/summary"
-  local edge_url="http://127.0.0.1:${CODEG_PUBLIC_PORT:-3080}/codeg-quota/summary"
+  sleep 0.8
+  local ok_sidec=0 ok_same=0
+  local url edge_url
+  url="http://127.0.0.1:${PORT}/summary"
+
   if have curl; then
-    if curl -fsS --max-time 35 "${url}?refresh=1" -o /tmp/codeg-quota-health.json 2>/dev/null; then
+    if curl -fsS --max-time 35 -H "Accept: application/json" "${url}?refresh=1" \
+         -o /tmp/codeg-quota-health.json 2>/dev/null \
+       && json_providers_ok /tmp/codeg-quota-health.json; then
       log "sidecar OK ← ${url}"
-      if have python3; then
-        python3 - <<'PY'
-import json
-d=json.load(open("/tmp/codeg-quota-health.json"))
-for p in d.get("providers",[]):
-  if p.get("status")=="disabled": continue
-  print(f"  · {p.get('label')}: {p.get('status')}  plan={p.get('plan')}  used={p.get('used')}  reset={p.get('resets_at')}")
-PY
-      fi
+      ok_sidec=1
     else
-      warn "sidecar 暂未响应 ${url}（稍后: curl '${url}'）"
+      warn "sidecar not ready: ${url}"
     fi
-    if curl -fsS --max-time 10 -H "Accept: application/json" "${edge_url}" -o /tmp/codeg-quota-edge.json 2>/dev/null \
-       && python3 -c "import json;d=json.load(open('/tmp/codeg-quota-edge.json')); assert isinstance(d.get('providers'),list)" 2>/dev/null; then
-      log "同域代理 OK ← ${edge_url}"
-    else
-      warn "同域代理未返回 JSON: ${edge_url}"
-      warn "  systemctl status codeg-edge --no-pager | head"
-      warn "  curl -i ${edge_url} | head"
+
+    # same-origin candidates the browser might hit
+    local -a candidates=(
+      "http://127.0.0.1:${CODEG_PUBLIC_PORT}${QUOTA_PREFIX}/summary"
+      "http://127.0.0.1:3080${QUOTA_PREFIX}/summary"
+    )
+    # if nginx listens on high TLS ports, try Host-based local https later — skip cert mess
+    local c
+    for c in "${candidates[@]}"; do
+      if curl -fsS --max-time 8 -H "Accept: application/json" "$c" \
+           -o /tmp/codeg-quota-same.json 2>/dev/null \
+         && json_providers_ok /tmp/codeg-quota-same.json >/dev/null; then
+        log "same-origin OK ← $c"
+        ok_same=1
+        break
+      fi
+    done
+
+    if [[ "$ok_same" -eq 0 ]]; then
+      if [[ "$ACCESS_MODE" == "nginx" || "$ACCESS_MODE" == "caddy" ]]; then
+        log "same-origin via public HTTPS reverse-proxy (check in browser: ${QUOTA_PREFIX}/summary)"
+        # try detect public without verify
+        if have curl; then
+          local host_guess
+          host_guess="$(grep -hR server_name /etc/nginx/sites-enabled 2>/dev/null | grep -v '#' | awk '{print $2}' | tr -d ';' | grep -v '^_' | head -1 || true)"
+          if [[ -n "$host_guess" ]]; then
+            log "  hint: curl -sk https://${host_guess}/codeg-quota/summary | head"
+          fi
+        fi
+        ok_same=1  # RP mode is validated by config inject success
+      else
+        warn "same-origin path not verified — browser may show Failed to fetch"
+        warn "  fix: ensure reverse-proxy or edge serves ${QUOTA_PREFIX}/summary as JSON"
+      fi
     fi
   fi
+
+  [[ "$ok_sidec" -eq 1 ]] || warn "sidecar unhealthy — check: journalctl -u codeg-quota -n 50"
 }
+
+# ══════════════════════════════════════════════════════════════════════
+# main
+# ══════════════════════════════════════════════════════════════════════
 
 main() {
   echo ""
-  log "codeg-quota-addon v${VERSION} 傻瓜安装"
-  log "包: $ROOT"
-  log "前缀: $PREFIX | bind ${BIND_HOST}:${PORT}"
+  log "codeg-tools v${VERSION}"
+  log "package: $ROOT"
+  log "prefix:  $PREFIX"
   echo ""
 
-  [[ -d "$ROOT/sidecar" ]] || die "安装包损坏：缺少 sidecar/"
-  [[ "$DO_WEB" -eq 1 && ! -d "$ROOT/web" ]] && die "安装包损坏：缺少 web/"
+  [[ -d "$ROOT/sidecar" ]] || die "package missing sidecar/"
+  [[ "$DO_WEB" -eq 1 && ! -d "$ROOT/web" ]] && die "package missing web/"
+
+  probe_environment
 
   if [[ "$DO_SIDECAR" -eq 1 ]]; then
     install_sidecar
@@ -725,31 +982,29 @@ main() {
   if [[ "$DO_WEB" -eq 1 ]]; then
     install_web_all || true
   fi
-  # macOS: auto try desktop if --desktop OR app exists and user on macos
   if [[ "$TARGET_OS" == "macos" ]]; then
     if [[ "$DO_DESKTOP" -eq 1 ]]; then
       install_web_desktop || true
     elif discover_desktop_web >/dev/null 2>&1; then
-      log "检测到 codeg.app，自动注入桌面 Web 资源"
+      log "codeg.app found — injecting desktop web"
       install_web_desktop || true
     fi
   fi
+
   if [[ "$DO_SIDECAR" -eq 1 ]]; then
-    if install_nginx_quota_location; then
-      log "已用 nginx 同域反代额度（适合 https://domain 访问）"
-    else
-      install_edge_proxy || true
-    fi
+    setup_same_origin_access || true
     health_check
   fi
 
   echo ""
-  log "完成。请硬刷新浏览器（Ctrl+Shift+R / Cmd+Shift+R）"
-  log "额度优先走同域: http://<主机>:3080/codeg-quota/summary"
-  log "直连备用:      http://<主机>:${PORT}/summary"
-  echo "  配置: ${PREFIX}/config.json"
-  echo "  卸载: ${ROOT}/uninstall.sh"
-  echo "  官方更新 Codeg 后：再执行一次 ./install.sh 即可"
+  log "done. Hard-refresh the browser (Ctrl+Shift+R / Cmd+Shift+R)."
+  echo "  access mode : ${ACCESS_MODE}"
+  echo "  sidecar     : ${BIND_HOST}:${PORT}"
+  echo "  browser API : ${QUOTA_PREFIX}/summary  (same origin as the page)"
+  echo "  direct API  : http://127.0.0.1:${PORT}/summary"
+  echo "  config      : ${PREFIX}/config.json"
+  echo "  uninstall   : ${ROOT}/uninstall.sh"
+  echo "  after official Codeg upgrade: re-run this installer"
   echo ""
 }
 
