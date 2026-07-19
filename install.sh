@@ -11,7 +11,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.4.2"
+VERSION="1.4.3"
 
 OS_MODE="auto"          # auto | linux | macos | menu
 DO_SIDECAR=1
@@ -458,6 +458,90 @@ install_web_desktop() {
 }
 
 
+# ── nginx HTTPS reverse-proxy: /codeg-quota/ → sidecar :3091 ──────────
+# 生产环境常见：浏览器是 https://domain:18443，不能直连 :3091（混合内容）。
+# 优先改 nginx，比 edge 抢 3080 更稳。
+install_nginx_quota_location() {
+  [[ "$TARGET_OS" == "linux" ]] || return 1
+  [[ "$(id -u)" -eq 0 ]] || return 1
+  have nginx || return 1
+  local conf f n=0 real
+  local -a confs=()
+  for f in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
+    [[ -f "$f" || -L "$f" ]] || continue
+    if grep -qE 'proxy_pass[[:space:]]+http://127\.0\.0\.1:3080|proxy_pass[[:space:]]+http://localhost:3080' "$f" 2>/dev/null; then
+      confs+=("$f")
+    fi
+  done
+  ((${#confs[@]})) || return 1
+
+  for conf in "${confs[@]}"; do
+    real="$conf"
+    [[ -L "$conf" ]] && real="$(readlink -f "$conf" 2>/dev/null || echo "$conf")"
+    if grep -q 'location /codeg-quota/' "$real" 2>/dev/null; then
+      log "nginx 已有 /codeg-quota/ ← $real"
+      n=$((n+1))
+      continue
+    fi
+    cp -a "$real" "${real}.bak-codeg-tools-$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+    if have python3; then
+      if python3 - "$real" "$PORT" <<'PY'
+import sys
+from pathlib import Path
+path, port = sys.argv[1], sys.argv[2]
+t = Path(path).read_text()
+if "location /codeg-quota/" in t:
+    raise SystemExit(0)
+block = f"""
+    # codeg-tools quota (same-origin under HTTPS reverse proxy)
+    location /codeg-quota/ {{
+        proxy_pass http://127.0.0.1:{port}/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+    }}
+
+"""
+for needle in ["    location /api/ {", "    location / {"]:
+    if needle in t:
+        Path(path).write_text(t.replace(needle, block + needle, 1))
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+      then
+        if grep -q 'location /codeg-quota/' "$real" 2>/dev/null; then
+          n=$((n+1))
+          log "nginx 已注入 /codeg-quota/ → :${PORT}  ($real)"
+        fi
+      fi
+    fi
+  done
+
+  if ((n>0)); then
+    if nginx -t 2>/dev/null; then
+      systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || true
+      log "nginx 已 reload"
+      systemctl stop codeg-edge.service 2>/dev/null || true
+      systemctl disable codeg-edge.service 2>/dev/null || true
+      local d
+      for d in /etc/systemd/system/codeg.service.d /etc/systemd/system/codeg-server.service.d; do
+        if [[ -f "$d/codeg-tools-port.conf" ]]; then
+          rm -f "$d/codeg-tools-port.conf"
+          log "已移除 $d/codeg-tools-port.conf（保留 codeg :3080 给 nginx）"
+        fi
+      done
+      systemctl daemon-reload 2>/dev/null || true
+      return 0
+    fi
+    warn "nginx -t 失败，请手动检查配置"
+    return 1
+  fi
+  return 1
+}
+
 # ── same-origin edge proxy (public 3080 → codeg 13080 + quota 3091) ──
 # 用 systemd drop-in 强制 CODEG_PORT，不依赖 codeg-server.env 是否存在。
 CODEG_PUBLIC_PORT="${CODEG_PUBLIC_PORT:-3080}"
@@ -651,7 +735,11 @@ main() {
     fi
   fi
   if [[ "$DO_SIDECAR" -eq 1 ]]; then
-    install_edge_proxy || true
+    if install_nginx_quota_location; then
+      log "已用 nginx 同域反代额度（适合 https://domain 访问）"
+    else
+      install_edge_proxy || true
+    fi
     health_check
   fi
 
