@@ -11,7 +11,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.3.3"
+VERSION="1.4.0"
 
 OS_MODE="auto"          # auto | linux | macos | menu
 DO_SIDECAR=1
@@ -429,6 +429,13 @@ install_web_all() {
   fi
 
   for d in "${dirs[@]}"; do
+    # skip backup / previous official trees
+    case "$d" in
+      *backup*|*official-0*|*official-backup*) 
+        warn "跳过备份目录: $d"
+        continue
+        ;;
+    esac
     backup_and_deploy_web "$d" "webui-$((++n))"
   done
 
@@ -450,10 +457,88 @@ install_web_desktop() {
   warn "已改 App 资源；若系统提示损坏/无法打开，请在「隐私与安全性」中允许"
 }
 
+
+# ── same-origin edge proxy (public 3080 → codeg 13080 + quota 3091) ──
+CODEG_PUBLIC_PORT="${CODEG_PUBLIC_PORT:-3080}"
+CODEG_BACKEND_PORT="${CODEG_BACKEND_PORT:-13080}"
+INSTALL_EDGE=1
+
+install_edge_proxy() {
+  [[ "${INSTALL_EDGE:-1}" -eq 1 ]] || return 0
+  [[ "$TARGET_OS" == "linux" ]] || { warn "edge 代理目前仅 Linux 自动安装（macOS 仍用 :${PORT}）"; return 0; }
+  [[ "$(id -u)" -eq 0 ]] || { warn "非 root：跳过 edge 代理（云主机请用: curl ... | sudo bash）"; return 0; }
+  need_node
+  local node_bin envf
+  node_bin="$(command -v node)"
+  [[ -f "$ROOT/sidecar/edge-proxy.mjs" ]] || { warn "缺少 edge-proxy.mjs"; return 0; }
+  cp -f "$ROOT/sidecar/edge-proxy.mjs" "$PREFIX/edge-proxy.mjs"
+  chmod 755 "$PREFIX/edge-proxy.mjs"
+
+  CODEG_ENV_FILE=""
+  for envf in /etc/codeg/codeg-server.env /usr/local/etc/codeg/codeg-server.env; do
+    if [[ -f "$envf" ]]; then
+      CODEG_ENV_FILE="$envf"
+      break
+    fi
+  done
+  if [[ -z "$CODEG_ENV_FILE" ]]; then
+    warn "未找到 codeg-server.env，跳过 edge（仍可用 :${PORT} 直连）"
+    return 0
+  fi
+
+  if [[ ! -f "${CODEG_ENV_FILE}.before-codeg-tools" ]]; then
+    cp -a "$CODEG_ENV_FILE" "${CODEG_ENV_FILE}.before-codeg-tools"
+    log "已备份 ${CODEG_ENV_FILE}.before-codeg-tools"
+  fi
+
+  if grep -qE '^[[:space:]]*CODEG_PORT=' "$CODEG_ENV_FILE"; then
+    sed -i -E "s|^[[:space:]]*CODEG_PORT=.*|CODEG_PORT=${CODEG_BACKEND_PORT}|" "$CODEG_ENV_FILE"
+  else
+    echo "CODEG_PORT=${CODEG_BACKEND_PORT}" >> "$CODEG_ENV_FILE"
+  fi
+  if grep -qE '^[[:space:]]*CODEG_HOST=' "$CODEG_ENV_FILE"; then
+    sed -i -E 's|^[[:space:]]*CODEG_HOST=.*|CODEG_HOST=0.0.0.0|' "$CODEG_ENV_FILE"
+  else
+    echo "CODEG_HOST=0.0.0.0" >> "$CODEG_ENV_FILE"
+  fi
+  log "codeg-server 内网端口 → ${CODEG_BACKEND_PORT}（对外仍是 ${CODEG_PUBLIC_PORT}）"
+
+  cat > /etc/systemd/system/codeg-edge.service <<EOF
+[Unit]
+Description=Codeg same-origin edge proxy (quota + web)
+After=network-online.target codeg-server.service codeg-quota.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=CODEG_EDGE_HOST=0.0.0.0
+Environment=CODEG_EDGE_PORT=${CODEG_PUBLIC_PORT}
+Environment=CODEG_BACKEND_HOST=127.0.0.1
+Environment=CODEG_BACKEND_PORT=${CODEG_BACKEND_PORT}
+Environment=CODEG_QUOTA_HOST=127.0.0.1
+Environment=CODEG_QUOTA_PORT=${PORT}
+Environment=CODEG_QUOTA_PREFIX=/codeg-quota
+ExecStart=${node_bin} ${PREFIX}/edge-proxy.mjs
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl try-restart codeg-server.service 2>/dev/null || systemctl restart codeg-server.service 2>/dev/null || true
+  sleep 0.6
+  systemctl enable --now codeg-edge.service
+  log "systemd: codeg-edge.service 已启用（同域 /codeg-quota → sidecar）"
+}
+
+
 health_check() {
   log "健康检查…"
-  sleep 0.8
+  sleep 1
   local url="http://127.0.0.1:${PORT}/summary"
+  local edge_url="http://127.0.0.1:${CODEG_PUBLIC_PORT:-3080}/codeg-quota/summary"
   if have curl; then
     if curl -fsS --max-time 35 "${url}?refresh=1" -o /tmp/codeg-quota-health.json 2>/dev/null; then
       log "sidecar OK ← ${url}"
@@ -467,7 +552,12 @@ for p in d.get("providers",[]):
 PY
       fi
     else
-      warn "sidecar 暂未响应 ${url}（稍后执行: curl '${url}'）"
+      warn "sidecar 暂未响应 ${url}（稍后: curl '${url}'）"
+    fi
+    if curl -fsS --max-time 10 "${edge_url}" -o /tmp/codeg-quota-edge.json 2>/dev/null; then
+      log "同域代理 OK ← ${edge_url}"
+    else
+      warn "同域代理暂未就绪 ${edge_url}（云主机 Failed to fetch 时请 sudo 重装）"
     fi
   fi
 }
@@ -498,11 +588,14 @@ main() {
     fi
   fi
   if [[ "$DO_SIDECAR" -eq 1 ]]; then
+    install_edge_proxy || true
     health_check
   fi
 
   echo ""
   log "完成。请硬刷新浏览器（Ctrl+Shift+R / Cmd+Shift+R）"
+  log "额度优先走同域: http://<主机>:3080/codeg-quota/summary"
+  log "直连备用:      http://<主机>:${PORT}/summary"
   echo "  配置: ${PREFIX}/config.json"
   echo "  卸载: ${ROOT}/uninstall.sh"
   echo "  官方更新 Codeg 后：再执行一次 ./install.sh 即可"
