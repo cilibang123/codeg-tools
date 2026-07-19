@@ -11,7 +11,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.3.0"
+VERSION="1.3.1"
 
 OS_MODE="auto"          # auto | linux | macos | menu
 DO_SIDECAR=1
