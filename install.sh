@@ -15,7 +15,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.5.2"
+VERSION="1.5.3"
 
 # ── knobs ─────────────────────────────────────────────────────────────
 OS_MODE="auto"          # auto | linux | macos | menu
@@ -903,6 +903,116 @@ maybe_open_firewall() {
   fi
 }
 
+# Restart desktop codeg.app when running so new web assets load.
+run_as_real_user() {
+  if is_root && [[ -n "${REAL_USER:-}" && "$REAL_USER" != "root" ]]; then
+    sudo -u "$REAL_USER" -H "$@"
+  else
+    "$@"
+  fi
+}
+
+codeg_app_is_running() {
+  if pgrep -x codeg >/dev/null 2>&1; then return 0; fi
+  if pgrep -x Codeg >/dev/null 2>&1; then return 0; fi
+  if ps aux 2>/dev/null | grep -i '[c]odeg.app/Contents/MacOS' >/dev/null 2>&1; then
+    return 0
+  fi
+  if have osascript; then
+    if run_as_real_user osascript -e 'tell application "System Events" to (name of processes) contains "codeg"' 2>/dev/null | grep -qi true; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+find_codeg_app_path() {
+  local pair app
+  if pair="$(discover_desktop_web 2>/dev/null)"; then
+    app="${pair##*|}"
+    [[ -d "$app" ]] && { echo "$app"; return 0; }
+  fi
+  for app in \
+    "${DESKTOP_APP_OVERRIDE}" \
+    "/Applications/codeg.app" \
+    "${REAL_HOME}/Applications/codeg.app" \
+    "$HOME/Applications/codeg.app"
+  do
+    [[ -n "$app" && -d "$app" ]] && { echo "$app"; return 0; }
+  done
+  return 1
+}
+
+force_quit_codeg_processes() {
+  pkill -x codeg 2>/dev/null || true
+  pkill -x Codeg 2>/dev/null || true
+  local pids
+  pids="$(ps aux 2>/dev/null | grep -i '[c]odeg.app/Contents/MacOS' | awk '{print $2}' | tr '\n' ' ')"
+  if [[ -n "${pids// /}" ]]; then
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+  fi
+}
+
+restart_macos_codeg_if_running() {
+  [[ "$TARGET_OS" == "macos" ]] || return 0
+
+  local app
+  app="$(find_codeg_app_path || true)"
+  if [[ -z "$app" ]]; then
+    log "macOS: 未找到 codeg.app，跳过应用重启"
+    return 0
+  fi
+
+  if ! codeg_app_is_running; then
+    log "macOS: codeg 未在运行（下次打开即用新界面）"
+    return 0
+  fi
+
+  log "macOS: 检测到 codeg 正在运行 → 自动重启以加载新资源"
+  log "  app: $app"
+
+  if have osascript; then
+    run_as_real_user osascript -e 'tell application "codeg" to if it is running then quit' 2>/dev/null || true
+    run_as_real_user osascript -e 'tell application "Codeg" to if it is running then quit' 2>/dev/null || true
+  fi
+
+  local i=0
+  while codeg_app_is_running && [[ $i -lt 30 ]]; do
+    sleep 0.5
+    i=$((i + 1))
+  done
+
+  if codeg_app_is_running; then
+    warn "优雅退出超时，强制结束 codeg…"
+    force_quit_codeg_processes
+    sleep 1
+  fi
+
+  if have open; then
+    if is_root && [[ -n "${REAL_USER:-}" && "$REAL_USER" != "root" ]]; then
+      sudo -u "$REAL_USER" -H open "$app" 2>/dev/null \
+        || warn "无法自动打开 codeg.app，请手动打开"
+    else
+      open "$app" 2>/dev/null || warn "无法自动打开 codeg.app，请手动打开"
+    fi
+    log "macOS: 已重新打开 codeg.app"
+  else
+    warn "无 open 命令，请手动打开 codeg.app"
+  fi
+
+  local uid label="com.codeg.quota"
+  uid="$(id -u "${REAL_USER:-$USER}" 2>/dev/null || id -u)"
+  if [[ -n "$uid" ]]; then
+    if is_root && [[ -n "${REAL_USER:-}" && "$REAL_USER" != "root" ]]; then
+      sudo -u "$REAL_USER" launchctl kickstart -k "gui/${uid}/${label}" 2>/dev/null || true
+    else
+      launchctl kickstart -k "gui/${uid}/${label}" 2>/dev/null || true
+    fi
+  fi
+}
+
+
 setup_same_origin_access() {
   log "配置浏览器可达的额度入口（同域优先）…"
   if [[ "$TARGET_OS" == "macos" ]]; then
@@ -1056,8 +1166,17 @@ main() {
     health_check
   fi
 
+  if [[ "$TARGET_OS" == "macos" ]]; then
+    restart_macos_codeg_if_running || true
+  fi
+
   echo ""
-  log "done. Hard-refresh the browser (Ctrl+Shift+R / Cmd+Shift+R)."
+  log "done."
+  if [[ "$TARGET_OS" == "macos" ]]; then
+    log "若 codeg 未自动打开，请手动启动 codeg.app"
+  else
+    log "Hard-refresh the browser (Ctrl+Shift+R / Cmd+Shift+R)."
+  fi
   echo "  access mode : ${ACCESS_MODE}"
   echo "  sidecar     : ${BIND_HOST}:${PORT}"
   echo "  service user: ${REAL_USER}  home: ${REAL_HOME}"

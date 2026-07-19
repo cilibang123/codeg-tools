@@ -14,7 +14,7 @@
 curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | sudo bash
 ```
 
-**macOS 桌面**（当前登录用户，尽量不要 sudo）：
+**macOS 桌面（安装时若 App 在运行会自动重启）**（当前登录用户，尽量不要 sudo）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | bash -s -- --desktop
@@ -57,7 +57,7 @@ curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/uninst
 |------|------|
 | nginx/caddy 反代到 codeg | 注入 `/codeg-quota/` → sidecar |
 | 无反代、codeg 直接对外 | edge 占对外端口（Linux） |
-| 本机 / macOS 桌面 | `127.0.0.1:3091` 直连 |
+| 本机 / macOS 桌面（安装时若 App 在运行会自动重启） | `127.0.0.1:3091` 直连 |
 
 ## 自检
 
