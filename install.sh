@@ -11,7 +11,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.4.0"
+VERSION="1.4.1"
 
 OS_MODE="auto"          # auto | linux | macos | menu
 DO_SIDECAR=1
@@ -463,6 +463,54 @@ CODEG_PUBLIC_PORT="${CODEG_PUBLIC_PORT:-3080}"
 CODEG_BACKEND_PORT="${CODEG_BACKEND_PORT:-13080}"
 INSTALL_EDGE=1
 
+discover_codeg_env_file() {
+  local f line unit
+  for f in /etc/codeg/codeg-server.env /usr/local/etc/codeg/codeg-server.env \
+           /etc/default/codeg-server "$HOME/.config/codeg/codeg-server.env"; do
+    [[ -f "$f" ]] && { echo "$f"; return 0; }
+  done
+  if have systemctl; then
+    unit="$(systemctl show -p FragmentPath codeg-server.service --value 2>/dev/null || true)"
+    if [[ -n "$unit" && -f "$unit" ]]; then
+      line="$(grep -E '^EnvironmentFile=' "$unit" 2>/dev/null | head -1 || true)"
+      f="${line#EnvironmentFile=}"
+      f="${f#-}"
+      f="${f//\"/}"
+      [[ -n "$f" && -f "$f" ]] && { echo "$f"; return 0; }
+    fi
+    line="$(systemctl show -p EnvironmentFiles codeg-server.service --value 2>/dev/null | head -1 || true)"
+    f="${line%% *}"
+    f="${f//\"/}"
+    [[ -n "$f" && -f "$f" ]] && { echo "$f"; return 0; }
+  fi
+  return 1
+}
+
+ensure_codeg_env_file() {
+  local f
+  if f="$(discover_codeg_env_file)"; then
+    echo "$f"
+    return 0
+  fi
+  if have systemctl && systemctl cat codeg-server.service >/dev/null 2>&1; then
+    mkdir -p /etc/codeg
+    f=/etc/codeg/codeg-server.env
+    if [[ ! -f "$f" ]]; then
+      {
+        echo "CODEG_HOST=0.0.0.0"
+        echo "CODEG_PORT=${CODEG_PUBLIC_PORT}"
+        echo "CODEG_STATIC_DIR=/usr/local/share/codeg/web"
+        echo "CODEG_DATA_DIR=/root/.local/share/codeg"
+      } >"$f"
+      chmod 600 "$f"
+      log "已创建缺失的 $f"
+    fi
+    echo "$f"
+    return 0
+  fi
+  return 1
+}
+
 install_edge_proxy() {
   [[ "${INSTALL_EDGE:-1}" -eq 1 ]] || return 0
   [[ "$TARGET_OS" == "linux" ]] || { warn "edge 代理目前仅 Linux 自动安装（macOS 仍用 :${PORT}）"; return 0; }
@@ -474,17 +522,12 @@ install_edge_proxy() {
   cp -f "$ROOT/sidecar/edge-proxy.mjs" "$PREFIX/edge-proxy.mjs"
   chmod 755 "$PREFIX/edge-proxy.mjs"
 
-  CODEG_ENV_FILE=""
-  for envf in /etc/codeg/codeg-server.env /usr/local/etc/codeg/codeg-server.env; do
-    if [[ -f "$envf" ]]; then
-      CODEG_ENV_FILE="$envf"
-      break
-    fi
-  done
-  if [[ -z "$CODEG_ENV_FILE" ]]; then
-    warn "未找到 codeg-server.env，跳过 edge（仍可用 :${PORT} 直连）"
+  if ! envf="$(ensure_codeg_env_file)"; then
+    warn "未找到/无法创建 codeg-server.env，跳过 edge（仍可用 :${PORT} 直连）"
     return 0
   fi
+  CODEG_ENV_FILE="$envf"
+  log "使用 codeg env: $CODEG_ENV_FILE"
 
   if [[ ! -f "${CODEG_ENV_FILE}.before-codeg-tools" ]]; then
     cp -a "$CODEG_ENV_FILE" "${CODEG_ENV_FILE}.before-codeg-tools"
@@ -526,10 +569,32 @@ RestartSec=2
 WantedBy=multi-user.target
 EOF
 
+  # Ensure codex is visible to the quota service (often in /root/.local/bin)
+  mkdir -p /etc/systemd/system/codeg-quota.service.d
+  cat > /etc/systemd/system/codeg-quota.service.d/path.conf <<EOF
+[Service]
+Environment=PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/root
+EOF
+  if command -v codex >/dev/null 2>&1 && have python3; then
+    python3 - "$PREFIX/config.json" "$(command -v codex)" <<'PY'
+import json, sys
+path, bin_path = sys.argv[1], sys.argv[2]
+cfg = json.load(open(path))
+for p in cfg.get("providers", []):
+    if p.get("type") == "codex_cli":
+        p["codex_bin"] = bin_path
+json.dump(cfg, open(path, "w"), indent=2, ensure_ascii=False)
+open(path, "a").write("\n")
+PY
+  fi
+
   systemctl daemon-reload
   systemctl try-restart codeg-server.service 2>/dev/null || systemctl restart codeg-server.service 2>/dev/null || true
-  sleep 0.6
+  systemctl try-restart codeg-quota.service 2>/dev/null || true
+  sleep 0.8
   systemctl enable --now codeg-edge.service
+  systemctl restart codeg-edge.service 2>/dev/null || true
   log "systemd: codeg-edge.service 已启用（同域 /codeg-quota → sidecar）"
 }
 
@@ -554,10 +619,13 @@ PY
     else
       warn "sidecar 暂未响应 ${url}（稍后: curl '${url}'）"
     fi
-    if curl -fsS --max-time 10 "${edge_url}" -o /tmp/codeg-quota-edge.json 2>/dev/null; then
+    if curl -fsS --max-time 10 -H "Accept: application/json" "${edge_url}" -o /tmp/codeg-quota-edge.json 2>/dev/null \
+       && python3 -c "import json;d=json.load(open('/tmp/codeg-quota-edge.json')); assert isinstance(d.get('providers'),list)" 2>/dev/null; then
       log "同域代理 OK ← ${edge_url}"
     else
-      warn "同域代理暂未就绪 ${edge_url}（云主机 Failed to fetch 时请 sudo 重装）"
+      warn "同域代理未返回 JSON: ${edge_url}"
+      warn "  systemctl status codeg-edge --no-pager | head"
+      warn "  curl -i ${edge_url} | head"
     fi
   fi
 }

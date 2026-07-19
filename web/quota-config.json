@@ -1,5 +1,1 @@
-{
-  "enabled": true,
-  "apiUrl": "auto",
-  "refreshMs": 300000
-}
+{"enabled":true,"apiUrl":"auto","refreshMs":300000}
