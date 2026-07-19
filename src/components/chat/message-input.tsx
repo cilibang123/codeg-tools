@@ -178,10 +178,11 @@ import {
   type ReferenceGroupLabels,
 } from "@/components/chat/composer/use-reference-search"
 import type { MentionUiLabels } from "@/components/chat/composer/suggestion/types"
-import type {
-  ImageInputAttachment,
-  InputAttachment,
-  ResourceInputAttachment,
+import {
+  imageAttachmentToPromptBlock,
+  type ImageInputAttachment,
+  type InputAttachment,
+  type ResourceInputAttachment,
 } from "./message-input-attachments"
 
 /**
@@ -617,7 +618,16 @@ export function MessageInput({
   // Bridge so the early `onChange` handler can call the editor-driven slash
   // detection that is defined further down (after the slash state).
   const detectSlashTriggerRef = useRef<(() => void) | null>(null)
-  const canAttachImages = promptCapabilities.image
+  // Route pasted / dropped / picked images to the top thumbnail strip whenever
+  // the agent can receive them in ANY form — either as a native ACP image block
+  // (`image`) or as an embedded resource blob (`embedded_context`, e.g. Grok,
+  // which advertises `image: false` but `embeddedContext: true`). Without the
+  // `embedded_context` arm, Grok's images fell through to the generic
+  // file-resource path and rendered as an inline badge instead of a thumbnail.
+  // `buildDraft` still picks the wire encoding per-capability, so the sent
+  // payload is unchanged for each agent — this only unifies the presentation.
+  const canAttachImages =
+    promptCapabilities.image || promptCapabilities.embedded_context
 
   useEffect(() => {
     if (isActive && !disabled && !isPrompting) {
@@ -2432,14 +2442,14 @@ export function MessageInput({
     if (blocks.length === 0 && attachments.length === 0) return null
 
     // `attachments` holds only images now — files live inline as badges above.
+    // The wire encoding is capability-driven (native `image` block vs embedded
+    // `resource` blob) so an agent that advertises `image: false` but
+    // `embedded_context: true` (e.g. Grok) still receives the bytes it accepts.
     for (const attachment of attachments) {
       if (attachment.type === "image") {
-        blocks.push({
-          type: "image",
-          data: attachment.data,
-          mime_type: attachment.mimeType,
-          uri: attachment.uri,
-        })
+        blocks.push(
+          imageAttachmentToPromptBlock(attachment, promptCapabilities)
+        )
       }
     }
 
@@ -2447,7 +2457,7 @@ export function MessageInput({
       displayProse ||
       `Attached ${attachments.length} attachment${attachments.length > 1 ? "s" : ""}`
     return { blocks, displayText }
-  }, [attachments, skillPrefix])
+  }, [attachments, skillPrefix, promptCapabilities])
 
   // Clear the editor + attachments after a send / enqueue / save.
   const resetComposer = useCallback(() => {
