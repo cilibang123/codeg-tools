@@ -1,6 +1,10 @@
 # codeg-quota-addon
 
-给**已部署的 Codeg** 一键挂上「账号额度状态栏」（Codex 周额度 + Grok SuperGrok Heavy 周额度）。
+给**已部署的 Codeg** 一键挂上状态栏增强：
+
+- **左侧**：本机局域网 IP（点击可复制）
+- **右侧**：账号额度（Codex 周额度 + Grok SuperGrok Heavy 周额度）
+
 
 - **不修改** `codeg-server` 二进制  
 - 官方更新后：**再跑一次 `install.sh` 即可**  

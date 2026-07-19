@@ -1,32 +1,32 @@
 <!doctype html>
 <meta charset="utf-8"/>
-<title>quota check</title>
+<title>quota / host check</title>
 <pre id="out">checking…</pre>
 <script>
 (async () => {
   const out = document.getElementById('out');
   const lines = [];
   const host = location.hostname;
-  const auto = `http://${host}:3091/summary`;
+  const base = `http://${host}:3091`;
   lines.push('page=' + location.href);
-  lines.push('autoUrl=' + auto);
   try {
     const cfg = await fetch('/quota-config.json', {cache:'no-store'}).then(r=>r.json());
     lines.push('config=' + JSON.stringify(cfg));
   } catch (e) { lines.push('config error: ' + e); }
   const stale = localStorage.getItem('codeg.quota.apiUrl');
   lines.push('localStorage.apiUrl=' + JSON.stringify(stale));
-  // clear bad loopback override
   if (stale && /127\.0\.0\.1|localhost|\[::1\]/.test(stale) && host !== '127.0.0.1' && host !== 'localhost') {
     localStorage.removeItem('codeg.quota.apiUrl');
     lines.push('cleared stale loopback localStorage override');
   }
-  try {
-    const r = await fetch(auto, {cache:'no-store'});
-    const j = await r.json();
-    lines.push('summary OK: ' + j.providers.map(p => p.id + '=' + p.status + (p.display?(' '+p.display):'')).join(', '));
-  } catch (e) {
-    lines.push('summary FAILED: ' + e);
+  for (const path of ['/health', '/host', '/summary']) {
+    try {
+      const r = await fetch(base + path, {cache:'no-store'});
+      const j = await r.json();
+      lines.push(path + ' OK: ' + JSON.stringify(j).slice(0, 300));
+    } catch (e) {
+      lines.push(path + ' FAILED: ' + e);
+    }
   }
   out.textContent = lines.join('\n');
 })();

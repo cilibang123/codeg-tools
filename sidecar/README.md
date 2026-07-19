@@ -65,7 +65,7 @@ Example for a relay:
 ```json
 {
   "enabled": true,
-  "apiUrl": "http://127.0.0.1:3091/summary",
+  "apiUrl": "auto",
   "refreshMs": 300000
 }
 ```
@@ -73,8 +73,12 @@ Example for a relay:
 Overrides in the browser/desktop webview:
 
 ```js
-localStorage.setItem("codeg.quota.apiUrl", "http://127.0.0.1:3091/summary")
-localStorage.setItem("codeg.quota.enabled", "true")
+// Prefer apiUrl "auto" in quota-config.json (follows page hostname).
+// Only set localStorage for non-loopback overrides, e.g. a reverse proxy URL:
+// localStorage.setItem("codeg.quota.apiUrl", "https://codeg.example.com/quota/summary")
+// localStorage.setItem("codeg.quota.enabled", "true")
+// Clear a bad loopback override:
+// localStorage.removeItem("codeg.quota.apiUrl")
 ```
 
 ## Why a sidecar?

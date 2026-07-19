@@ -642,6 +642,51 @@ function pickCors(cfg, req) {
   return origins[0] || "*"
 }
 
+/**
+ * Collect non-loopback IPv4 addresses for the host status-bar chip.
+ * Prefer physical/LAN interfaces over docker/bridge/veth noise.
+ */
+function collectHostInfo() {
+  const ifaces = os.networkInterfaces() || {}
+  const addresses = []
+  for (const [name, list] of Object.entries(ifaces)) {
+    for (const entry of list || []) {
+      const family = entry.family
+      const isV4 = family === "IPv4" || family === 4
+      if (!isV4 || entry.internal) continue
+      addresses.push({
+        name,
+        address: entry.address,
+        cidr: entry.cidr || null,
+      })
+    }
+  }
+
+  const score = (item) => {
+    const n = String(item.name || "").toLowerCase()
+    let s = 0
+    if (/^(eth|en|eno|ens|enp|wlan|wlp|wl|wifi|em|bond)/.test(n)) s += 50
+    if (/^(docker|br-|veth|virbr|cni|flannel|cali|tun|tap|lo)/.test(n)) s -= 40
+    const a = item.address || ""
+    if (a.startsWith("192.168.")) s += 20
+    else if (a.startsWith("10.")) s += 15
+    else if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(a)) s += 10
+    // docker default bridge range often 172.17–19
+    if (/^172\.(1[7-9]|2[0-9]|3[0-1])\./.test(a) && /docker|br-/.test(n))
+      s -= 20
+    return s
+  }
+
+  addresses.sort((a, b) => score(b) - score(a) || a.address.localeCompare(b.address))
+
+  return {
+    hostname: os.hostname(),
+    primary: addresses[0]?.address || null,
+    addresses,
+    updated_at: new Date().toISOString(),
+  }
+}
+
 async function main() {
   const { configPath } = parseArgs(process.argv)
   const cfg = loadConfig(configPath)
@@ -661,6 +706,11 @@ async function main() {
       (url.pathname === "/health" || url.pathname === "/")
     ) {
       sendJson(res, 200, { ok: true, service: "codeg-quota-sidecar" }, cors)
+      return
+    }
+
+    if (req.method === "GET" && url.pathname === "/host") {
+      sendJson(res, 200, collectHostInfo(), cors)
       return
     }
 
@@ -687,7 +737,7 @@ async function main() {
     console.log(
       `[quota] listening on http://${cfg.host}:${cfg.port}  config=${configPath}`
     )
-    console.log(`[quota] GET /summary  GET /health`)
+    console.log(`[quota] GET /summary  GET /host  GET /health`)
   })
 }
 
