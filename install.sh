@@ -11,7 +11,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.4.1"
+VERSION="1.4.2"
 
 OS_MODE="auto"          # auto | linux | macos | menu
 DO_SIDECAR=1
@@ -459,97 +459,99 @@ install_web_desktop() {
 
 
 # ── same-origin edge proxy (public 3080 → codeg 13080 + quota 3091) ──
+# 用 systemd drop-in 强制 CODEG_PORT，不依赖 codeg-server.env 是否存在。
 CODEG_PUBLIC_PORT="${CODEG_PUBLIC_PORT:-3080}"
 CODEG_BACKEND_PORT="${CODEG_BACKEND_PORT:-13080}"
 INSTALL_EDGE=1
 
-discover_codeg_env_file() {
-  local f line unit
-  for f in /etc/codeg/codeg-server.env /usr/local/etc/codeg/codeg-server.env \
-           /etc/default/codeg-server "$HOME/.config/codeg/codeg-server.env"; do
-    [[ -f "$f" ]] && { echo "$f"; return 0; }
+find_codeg_unit() {
+  local u
+  for u in codeg-server codeg codeg-web codeg_server; do
+    if systemctl cat "${u}.service" >/dev/null 2>&1; then
+      echo "$u"
+      return 0
+    fi
   done
-  if have systemctl; then
-    unit="$(systemctl show -p FragmentPath codeg-server.service --value 2>/dev/null || true)"
-    if [[ -n "$unit" && -f "$unit" ]]; then
-      line="$(grep -E '^EnvironmentFile=' "$unit" 2>/dev/null | head -1 || true)"
-      f="${line#EnvironmentFile=}"
-      f="${f#-}"
-      f="${f//\"/}"
-      [[ -n "$f" && -f "$f" ]] && { echo "$f"; return 0; }
-    fi
-    line="$(systemctl show -p EnvironmentFiles codeg-server.service --value 2>/dev/null | head -1 || true)"
-    f="${line%% *}"
-    f="${f//\"/}"
-    [[ -n "$f" && -f "$f" ]] && { echo "$f"; return 0; }
-  fi
-  return 1
-}
-
-ensure_codeg_env_file() {
-  local f
-  if f="$(discover_codeg_env_file)"; then
-    echo "$f"
+  for u in /etc/systemd/system/codeg*.service /lib/systemd/system/codeg*.service; do
+    [[ -f "$u" ]] || continue
+    case "$(basename "$u")" in
+      codeg-quota*|codeg-edge*) continue ;;
+    esac
+    echo "$(basename "$u" .service)"
     return 0
-  fi
-  if have systemctl && systemctl cat codeg-server.service >/dev/null 2>&1; then
-    mkdir -p /etc/codeg
-    f=/etc/codeg/codeg-server.env
-    if [[ ! -f "$f" ]]; then
-      {
-        echo "CODEG_HOST=0.0.0.0"
-        echo "CODEG_PORT=${CODEG_PUBLIC_PORT}"
-        echo "CODEG_STATIC_DIR=/usr/local/share/codeg/web"
-        echo "CODEG_DATA_DIR=/root/.local/share/codeg"
-      } >"$f"
-      chmod 600 "$f"
-      log "已创建缺失的 $f"
-    fi
-    echo "$f"
-    return 0
-  fi
+  done
   return 1
 }
 
 install_edge_proxy() {
   [[ "${INSTALL_EDGE:-1}" -eq 1 ]] || return 0
-  [[ "$TARGET_OS" == "linux" ]] || { warn "edge 代理目前仅 Linux 自动安装（macOS 仍用 :${PORT}）"; return 0; }
-  [[ "$(id -u)" -eq 0 ]] || { warn "非 root：跳过 edge 代理（云主机请用: curl ... | sudo bash）"; return 0; }
+  [[ "$TARGET_OS" == "linux" ]] || { warn "edge 仅 Linux 自动安装"; return 0; }
+  [[ "$(id -u)" -eq 0 ]] || { warn "非 root：跳过 edge（请: curl ... | sudo bash）"; return 0; }
   need_node
-  local node_bin envf
+
+  local node_bin unit
   node_bin="$(command -v node)"
   [[ -f "$ROOT/sidecar/edge-proxy.mjs" ]] || { warn "缺少 edge-proxy.mjs"; return 0; }
+  mkdir -p "$PREFIX"
   cp -f "$ROOT/sidecar/edge-proxy.mjs" "$PREFIX/edge-proxy.mjs"
   chmod 755 "$PREFIX/edge-proxy.mjs"
 
-  if ! envf="$(ensure_codeg_env_file)"; then
-    warn "未找到/无法创建 codeg-server.env，跳过 edge（仍可用 :${PORT} 直连）"
-    return 0
-  fi
-  CODEG_ENV_FILE="$envf"
-  log "使用 codeg env: $CODEG_ENV_FILE"
+  unit=""
+  if unit="$(find_codeg_unit)"; then
+    log "找到 codeg 服务: ${unit}.service"
+    mkdir -p "/etc/systemd/system/${unit}.service.d"
+    cat > "/etc/systemd/system/${unit}.service.d/codeg-tools-port.conf" <<EOF
+[Service]
+Environment=CODEG_PORT=${CODEG_BACKEND_PORT}
+Environment=CODEG_HOST=0.0.0.0
+EOF
+    log "drop-in: ${unit}.service.d/codeg-tools-port.conf → PORT=${CODEG_BACKEND_PORT}"
 
-  if [[ ! -f "${CODEG_ENV_FILE}.before-codeg-tools" ]]; then
-    cp -a "$CODEG_ENV_FILE" "${CODEG_ENV_FILE}.before-codeg-tools"
-    log "已备份 ${CODEG_ENV_FILE}.before-codeg-tools"
+    # 同步 env 文件（有则改，无则忽略）
+    local envf
+    for envf in /etc/codeg/codeg-server.env /usr/local/etc/codeg/codeg-server.env; do
+      [[ -f "$envf" ]] || continue
+      if [[ ! -f "${envf}.before-codeg-tools" ]]; then
+        cp -a "$envf" "${envf}.before-codeg-tools" 2>/dev/null || true
+      fi
+      if grep -qE '^[[:space:]]*CODEG_PORT=' "$envf" 2>/dev/null; then
+        sed -i -E "s|^[[:space:]]*CODEG_PORT=.*|CODEG_PORT=${CODEG_BACKEND_PORT}|" "$envf" 2>/dev/null || true
+      else
+        echo "CODEG_PORT=${CODEG_BACKEND_PORT}" >>"$envf" 2>/dev/null || true
+      fi
+      log "已同步 $envf"
+      break
+    done
+  else
+    warn "未找到 codeg systemd 单元名；edge 仍会安装（后端假定 ${CODEG_BACKEND_PORT}）"
   fi
 
-  if grep -qE '^[[:space:]]*CODEG_PORT=' "$CODEG_ENV_FILE"; then
-    sed -i -E "s|^[[:space:]]*CODEG_PORT=.*|CODEG_PORT=${CODEG_BACKEND_PORT}|" "$CODEG_ENV_FILE"
-  else
-    echo "CODEG_PORT=${CODEG_BACKEND_PORT}" >> "$CODEG_ENV_FILE"
+  # codex 在 systemd 下需要完整 PATH + HOME
+  mkdir -p /etc/systemd/system/codeg-quota.service.d
+  cat > /etc/systemd/system/codeg-quota.service.d/path.conf <<EOF
+[Service]
+Environment=PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
+Environment=HOME=/root
+Environment=USER=root
+EOF
+  if command -v codex >/dev/null 2>&1 && have python3 && [[ -f "$PREFIX/config.json" ]]; then
+    python3 - "$PREFIX/config.json" "$(command -v codex)" <<'PY' || true
+import json, sys
+path, bin_path = sys.argv[1], sys.argv[2]
+cfg = json.load(open(path))
+for p in cfg.get("providers", []):
+    if p.get("type") == "codex_cli":
+        p["codex_bin"] = bin_path
+json.dump(cfg, open(path, "w"), indent=2, ensure_ascii=False)
+open(path, "a").write("\n")
+PY
+    log "codex_bin → $(command -v codex)"
   fi
-  if grep -qE '^[[:space:]]*CODEG_HOST=' "$CODEG_ENV_FILE"; then
-    sed -i -E 's|^[[:space:]]*CODEG_HOST=.*|CODEG_HOST=0.0.0.0|' "$CODEG_ENV_FILE"
-  else
-    echo "CODEG_HOST=0.0.0.0" >> "$CODEG_ENV_FILE"
-  fi
-  log "codeg-server 内网端口 → ${CODEG_BACKEND_PORT}（对外仍是 ${CODEG_PUBLIC_PORT}）"
 
   cat > /etc/systemd/system/codeg-edge.service <<EOF
 [Unit]
 Description=Codeg same-origin edge proxy (quota + web)
-After=network-online.target codeg-server.service codeg-quota.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -569,33 +571,26 @@ RestartSec=2
 WantedBy=multi-user.target
 EOF
 
-  # Ensure codex is visible to the quota service (often in /root/.local/bin)
-  mkdir -p /etc/systemd/system/codeg-quota.service.d
-  cat > /etc/systemd/system/codeg-quota.service.d/path.conf <<EOF
-[Service]
-Environment=PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin
-Environment=HOME=/root
-EOF
-  if command -v codex >/dev/null 2>&1 && have python3; then
-    python3 - "$PREFIX/config.json" "$(command -v codex)" <<'PY'
-import json, sys
-path, bin_path = sys.argv[1], sys.argv[2]
-cfg = json.load(open(path))
-for p in cfg.get("providers", []):
-    if p.get("type") == "codex_cli":
-        p["codex_bin"] = bin_path
-json.dump(cfg, open(path, "w"), indent=2, ensure_ascii=False)
-open(path, "a").write("\n")
-PY
-  fi
-
   systemctl daemon-reload
-  systemctl try-restart codeg-server.service 2>/dev/null || systemctl restart codeg-server.service 2>/dev/null || true
-  systemctl try-restart codeg-quota.service 2>/dev/null || true
-  sleep 0.8
-  systemctl enable --now codeg-edge.service
-  systemctl restart codeg-edge.service 2>/dev/null || true
-  log "systemd: codeg-edge.service 已启用（同域 /codeg-quota → sidecar）"
+  systemctl stop codeg-edge.service 2>/dev/null || true
+
+  if [[ -n "$unit" ]]; then
+    systemctl restart "${unit}.service" 2>/dev/null || true
+  fi
+  systemctl restart codeg-quota.service 2>/dev/null || true
+  sleep 1
+
+  systemctl enable codeg-edge.service 2>/dev/null || true
+  systemctl restart codeg-edge.service
+  sleep 0.6
+
+  if ss -tlnp 2>/dev/null | grep -q ":${CODEG_PUBLIC_PORT}"; then
+    log "edge 已监听 :${CODEG_PUBLIC_PORT}"
+  else
+    warn "端口 :${CODEG_PUBLIC_PORT} 未监听"
+    systemctl status codeg-edge.service --no-pager -l 2>/dev/null | head -25 || true
+  fi
+  log "完成 edge：/codeg-quota → :${PORT} ，其它 → codeg :${CODEG_BACKEND_PORT}"
 }
 
 
