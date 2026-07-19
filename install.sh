@@ -15,7 +15,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="1.5.0"
+VERSION="1.5.1"
 
 # ── knobs ─────────────────────────────────────────────────────────────
 OS_MODE="auto"          # auto | linux | macos | menu
@@ -127,6 +127,23 @@ if [[ "$TARGET_OS" == "linux" ]]; then
 else
   PREFIX="${PREFIX:-$HOME/Library/Application Support/codeg-quota}"
 fi
+
+# Real interactive user (critical on macOS when using sudo)
+REAL_USER="${CODEG_TOOLS_REAL_USER:-${SUDO_USER:-${USER:-$(id -un)}}}"
+if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+  REAL_USER="$SUDO_USER"
+fi
+if [[ -n "${CODEG_TOOLS_REAL_HOME:-}" ]]; then
+  REAL_HOME="$CODEG_TOOLS_REAL_HOME"
+elif [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+  REAL_HOME="$(eval echo "~${SUDO_USER}")"
+else
+  REAL_HOME="${HOME}"
+fi
+if [[ "$TARGET_OS" == "macos" ]]; then
+  PREFIX="${CODEG_TOOLS_PREFIX:-$REAL_HOME/Library/Application Support/codeg-quota}"
+fi
+
 
 # ══════════════════════════════════════════════════════════════════════
 # Phase 0 — probe environment (read-only)
@@ -272,25 +289,29 @@ probe_environment() {
     fi
   fi
 
-  # Prefer nginx inject when RP present (HTTPS-safe, no port fight)
-  if [[ "$ACCESS_MODE" == "nginx" || "$ACCESS_MODE" == "caddy" ]]; then
-    log "  access mode: reverse-proxy (${ACCESS_MODE}) — will inject ${QUOTA_PREFIX}/"
-  elif [[ "$ACCESS_MODE" == "edge" ]]; then
-    log "  access mode: edge proxy on :${CODEG_PUBLIC_PORT} (codeg → :${CODEG_BACKEND_PORT})"
-  else
-    log "  access mode: direct sidecar :${PORT} (same-host / open firewall)"
+  if [[ "$TARGET_OS" == "macos" ]]; then
+    ACCESS_MODE="direct"
   fi
 
-  # Sidecar bind: only need public if direct mode
+  if [[ "$ACCESS_MODE" == "nginx" || "$ACCESS_MODE" == "caddy" ]]; then
+    log "  access mode: reverse-proxy (${ACCESS_MODE}) — inject ${QUOTA_PREFIX}/"
+  elif [[ "$ACCESS_MODE" == "edge" ]]; then
+    log "  access mode: edge on :${CODEG_PUBLIC_PORT} (codeg → :${CODEG_BACKEND_PORT})"
+  else
+    log "  access mode: direct sidecar :${PORT}"
+  fi
+
   if [[ -z "$BIND_HOST" ]]; then
-    if [[ "$ACCESS_MODE" == "direct" ]]; then
+    if [[ "$TARGET_OS" == "macos" ]]; then
+      BIND_HOST="127.0.0.1"
+    elif [[ "$ACCESS_MODE" == "direct" ]]; then
       BIND_HOST="0.0.0.0"
     else
-      # nginx/edge only need loopback to sidecar
       BIND_HOST="127.0.0.1"
     fi
   fi
   log "  sidecar bind: ${BIND_HOST}:${PORT}"
+  log "  service user: ${REAL_USER:-?}  home: ${REAL_HOME:-?}"
 }
 
 # ══════════════════════════════════════════════════════════════════════
@@ -317,7 +338,8 @@ resolve_codex_bin() {
 }
 
 resolve_home_for_service() {
-  if is_root; then echo /root
+  if [[ -n "${REAL_HOME:-}" ]]; then echo "$REAL_HOME"
+  elif is_root; then echo /root
   else echo "$HOME"; fi
 }
 
@@ -417,13 +439,22 @@ EOF
 }
 
 install_sidecar_launchd() {
+  # Always install LaunchAgent for the REAL user (not root), so ~/.codex ~/.grok work.
   local label="com.codeg.quota"
-  local plist="$HOME/Library/LaunchAgents/${label}.plist"
-  local node_bin logs
+  local user_home agent_dir plist logs node_bin uid
+  user_home="${REAL_HOME:-$HOME}"
+  agent_dir="${user_home}/Library/LaunchAgents"
+  plist="${agent_dir}/${label}.plist"
+  logs="${PREFIX}/logs"
   node_bin="$(command -v node)"
-  logs="$PREFIX/logs"
-  mkdir -p "$HOME/Library/LaunchAgents" "$logs"
-  cat > "$plist" <<EOF
+  mkdir -p "$agent_dir" "$logs" "$PREFIX"
+
+  if is_root && [[ -n "${REAL_USER:-}" && "$REAL_USER" != "root" ]]; then
+    chown -R "${REAL_USER}:staff" "$PREFIX" 2>/dev/null || chown -R "${REAL_USER}" "$PREFIX" 2>/dev/null || true
+    chown -R "${REAL_USER}:staff" "$agent_dir" 2>/dev/null || true
+  fi
+
+  cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -443,17 +474,38 @@ install_sidecar_launchd() {
   <key>StandardErrorPath</key><string>${logs}/stderr.log</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>HOME</key><string>${HOME}</string>
-    <key>PATH</key><string>${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key><string>${user_home}</string>
+    <key>USER</key><string>${REAL_USER:-$USER}</string>
+    <key>PATH</key><string>${user_home}/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
   </dict>
 </dict>
 </plist>
-EOF
-  launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null || true
+PLIST
+
+  if is_root && [[ -n "${REAL_USER:-}" && "$REAL_USER" != "root" ]]; then
+    chown "${REAL_USER}:staff" "$plist" 2>/dev/null || chown "${REAL_USER}" "$plist" 2>/dev/null || true
+    uid="$(id -u "$REAL_USER" 2>/dev/null || true)"
+    if [[ -n "$uid" ]]; then
+      launchctl bootout "gui/${uid}/${label}" 2>/dev/null || true
+      sudo -u "$REAL_USER" launchctl bootout "gui/${uid}/${label}" 2>/dev/null || true
+      sudo -u "$REAL_USER" launchctl bootstrap "gui/${uid}" "$plist" 2>/dev/null \
+        || sudo -u "$REAL_USER" launchctl load -w "$plist" 2>/dev/null \
+        || true
+      sudo -u "$REAL_USER" launchctl enable "gui/${uid}/${label}" 2>/dev/null || true
+      sudo -u "$REAL_USER" launchctl kickstart -k "gui/${uid}/${label}" 2>/dev/null || true
+      log "launchd (user ${REAL_USER}): ${label}"
+      return 0
+    fi
+  fi
+
+  uid="$(id -u)"
+  launchctl bootout "gui/${uid}/${label}" 2>/dev/null || true
   launchctl unload "$plist" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || launchctl load -w "$plist"
-  log "launchd: ${label}"
+  launchctl bootstrap "gui/${uid}" "$plist" 2>/dev/null || launchctl load -w "$plist" 2>/dev/null || true
+  launchctl kickstart -k "gui/${uid}/${label}" 2>/dev/null || true
+  log "launchd: ${label} (HOME=${user_home})"
 }
+
 
 install_sidecar() {
   need_node
@@ -562,10 +614,14 @@ backup_and_deploy_web() {
     find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
     cp -a "$ROOT/web/." "$target/"
   fi
+  local api="auto"
+  case "$target" in
+    *.app/Contents/Resources/*|*/codeg.app/*) api="http://127.0.0.1:${PORT}/summary" ;;
+  esac
   cat > "$target/quota-config.json" <<EOF
 {
   "enabled": true,
-  "apiUrl": "auto",
+  "apiUrl": "${api}",
   "refreshMs": 300000
 }
 EOF
@@ -849,6 +905,11 @@ maybe_open_firewall() {
 
 setup_same_origin_access() {
   log "配置浏览器可达的额度入口（同域优先）…"
+  if [[ "$TARGET_OS" == "macos" ]]; then
+    ACCESS_MODE="direct"
+    log "macOS strategy: http://127.0.0.1:${PORT}/summary"
+    return 0
+  fi
 
   case "$ACCESS_MODE" in
     nginx|caddy)
@@ -906,63 +967,62 @@ PY
 
 health_check() {
   log "健康检查…"
-  sleep 0.8
-  local ok_sidec=0 ok_same=0
-  local url edge_url
-  url="http://127.0.0.1:${PORT}/summary"
-
-  if have curl; then
-    if curl -fsS --max-time 35 -H "Accept: application/json" "${url}?refresh=1" \
-         -o /tmp/codeg-quota-health.json 2>/dev/null \
-       && json_providers_ok /tmp/codeg-quota-health.json; then
-      log "sidecar OK ← ${url}"
-      ok_sidec=1
-    else
-      warn "sidecar not ready: ${url}"
-    fi
-
-    # same-origin candidates the browser might hit
-    local -a candidates=(
-      "http://127.0.0.1:${CODEG_PUBLIC_PORT}${QUOTA_PREFIX}/summary"
-      "http://127.0.0.1:3080${QUOTA_PREFIX}/summary"
-    )
-    # if nginx listens on high TLS ports, try Host-based local https later — skip cert mess
-    local c
-    for c in "${candidates[@]}"; do
-      if curl -fsS --max-time 8 -H "Accept: application/json" "$c" \
-           -o /tmp/codeg-quota-same.json 2>/dev/null \
-         && json_providers_ok /tmp/codeg-quota-same.json >/dev/null; then
-        log "same-origin OK ← $c"
-        ok_same=1
-        break
-      fi
-    done
-
-    if [[ "$ok_same" -eq 0 ]]; then
-      if [[ "$ACCESS_MODE" == "nginx" || "$ACCESS_MODE" == "caddy" ]]; then
-        log "same-origin via public HTTPS reverse-proxy (check in browser: ${QUOTA_PREFIX}/summary)"
-        # try detect public without verify
-        if have curl; then
-          local host_guess
-          host_guess="$(grep -hR server_name /etc/nginx/sites-enabled 2>/dev/null | grep -v '#' | awk '{print $2}' | tr -d ';' | grep -v '^_' | head -1 || true)"
-          if [[ -n "$host_guess" ]]; then
-            log "  hint: curl -sk https://${host_guess}/codeg-quota/summary | head"
-          fi
-        fi
-        ok_same=1  # RP mode is validated by config inject success
-      else
-        warn "same-origin path not verified — browser may show Failed to fetch"
-        warn "  fix: ensure reverse-proxy or edge serves ${QUOTA_PREFIX}/summary as JSON"
-      fi
-    fi
+  sleep 1
+  local url="http://127.0.0.1:${PORT}/summary"
+  if ! have curl; then
+    warn "curl missing — skip health check"
+    return 0
   fi
 
-  [[ "$ok_sidec" -eq 1 ]] || warn "sidecar unhealthy — check: journalctl -u codeg-quota -n 50"
+  if curl -fsS --max-time 35 -H "Accept: application/json" "${url}?refresh=1" \
+       -o /tmp/codeg-quota-health.json 2>/dev/null \
+     && python3 -c "import json;d=json.load(open('/tmp/codeg-quota-health.json')); assert isinstance(d.get('providers'),list)" 2>/dev/null; then
+    log "sidecar OK ← ${url}"
+    python3 - <<'PY' 2>/dev/null || true
+import json
+d=json.load(open("/tmp/codeg-quota-health.json"))
+for p in d.get("providers",[]):
+  if p.get("status")=="disabled": continue
+  msg = p.get("message") or ""
+  print(f"  · {p.get('label')}: {p.get('status')}  plan={p.get('plan')}  display={p.get('display')}  {msg}")
+PY
+  else
+    warn "sidecar not ready: ${url}"
+    if [[ "$TARGET_OS" == "macos" ]]; then
+      warn "  logs: ${PREFIX}/logs/stderr.log"
+      warn "  auth files must be under: ${REAL_HOME:-$HOME}"
+      warn "  run as the login user:  codex login && grok login"
+    else
+      warn "  journalctl -u codeg-quota -n 30 --no-pager"
+    fi
+    return 0
+  fi
+
+  if [[ "$TARGET_OS" == "macos" ]]; then
+    log "macOS: desktop/Web 使用 http://127.0.0.1:${PORT}/summary"
+    return 0
+  fi
+
+  local c
+  for c in \
+    "http://127.0.0.1:${CODEG_PUBLIC_PORT}${QUOTA_PREFIX}/summary" \
+    "http://127.0.0.1:3080${QUOTA_PREFIX}/summary"
+  do
+    if curl -fsS --max-time 5 -H "Accept: application/json" "$c" -o /tmp/codeg-quota-same.json 2>/dev/null \
+       && python3 -c "import json;d=json.load(open('/tmp/codeg-quota-same.json')); assert isinstance(d.get('providers'),list)" 2>/dev/null; then
+      log "same-origin OK ← $c"
+      return 0
+    fi
+  done
+  if [[ "$ACCESS_MODE" == "nginx" || "$ACCESS_MODE" == "caddy" ]]; then
+    log "same-origin expected via public HTTPS reverse-proxy (${QUOTA_PREFIX}/summary)"
+  elif [[ "$ACCESS_MODE" == "direct" ]]; then
+    log "direct mode: use http://127.0.0.1:${PORT}/summary"
+  else
+    warn "same-origin path not verified on loopback"
+  fi
 }
 
-# ══════════════════════════════════════════════════════════════════════
-# main
-# ══════════════════════════════════════════════════════════════════════
 
 main() {
   echo ""
@@ -1000,8 +1060,15 @@ main() {
   log "done. Hard-refresh the browser (Ctrl+Shift+R / Cmd+Shift+R)."
   echo "  access mode : ${ACCESS_MODE}"
   echo "  sidecar     : ${BIND_HOST}:${PORT}"
-  echo "  browser API : ${QUOTA_PREFIX}/summary  (same origin as the page)"
-  echo "  direct API  : http://127.0.0.1:${PORT}/summary"
+  echo "  service user: ${REAL_USER}  home: ${REAL_HOME}"
+  if [[ "$TARGET_OS" == "macos" ]]; then
+    echo "  desktop API : http://127.0.0.1:${PORT}/summary"
+    echo "  tip         : do not use sudo on macOS unless writing /Applications"
+    echo "  tip         : as login user run:  codex login && grok login"
+  else
+    echo "  browser API : ${QUOTA_PREFIX}/summary  (same origin)"
+    echo "  direct API  : http://127.0.0.1:${PORT}/summary"
+  fi
   echo "  config      : ${PREFIX}/config.json"
   echo "  uninstall   : ${ROOT}/uninstall.sh"
   echo "  after official Codeg upgrade: re-run this installer"

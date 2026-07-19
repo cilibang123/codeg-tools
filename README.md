@@ -10,15 +10,31 @@
 
 ## 一行安装
 
+**Linux 服务器**（写 systemd / nginx 需要 root）：
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | sudo bash
 ```
 
-macOS 桌面 App：
+**macOS 桌面**（请用当前登录用户，**尽量不要 sudo**；sudo 时脚本会把服务装回你的用户）：
 
 ```bash
+# 推荐
 curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | bash -s -- --desktop
+
+# 若必须 sudo 写 /Applications，也可以，服务仍归当前用户
+curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | sudo bash -s -- --desktop
 ```
+
+装完后在**同一用户**下登录额度源：
+
+```bash
+codex login
+grok login
+curl -sS http://127.0.0.1:3091/summary | head
+```
+
+然后完全退出并重新打开 codeg.app（或硬刷新）。
 
 ## 脚本怎么“变聪明”
 
