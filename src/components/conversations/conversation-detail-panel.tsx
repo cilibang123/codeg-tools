@@ -22,7 +22,12 @@ import {
 } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { toast } from "sonner"
-import { useAcpActions, useAcpEvent } from "@/contexts/acp-connections-context"
+import {
+  getCachedSelectors,
+  useAcpActions,
+  useAcpEvent,
+} from "@/contexts/acp-connections-context"
+import { useAcpAgents } from "@/hooks/use-acp-agents"
 import { useActiveFolder } from "@/contexts/active-folder-context"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { useTabActions, useTabStore } from "@/contexts/tab-context"
@@ -44,7 +49,7 @@ import { ChatInput } from "@/components/chat/chat-input"
 import { WelcomeHero, WelcomeTip } from "@/components/chat/welcome-hero"
 import { QuickActions } from "@/components/chat/quick-actions"
 import type { ComposerInjectContent } from "@/components/chat/message-input"
-import { ScrollArea } from "@/components/ui/scroll-area"
+import { TileScrollContainer } from "@/components/conversations/tile-scroll-container"
 import {
   acpFork,
   createChatConversation,
@@ -467,9 +472,26 @@ const ConversationTabView = memo(function ConversationTabView({
   // immediately regardless.
   const awaitingHistoricalSessionId =
     hasPersistedConversation && selectedAgent !== "cline" && detailLoading
+  // Install status of the currently selected agent. An agent can be enabled and
+  // platform-available yet have no CLI/SDK installed; selecting one can never
+  // connect. Rather than firing a doomed (and racy) auto-connect whose only
+  // outcome is a transient "not installed" toast, we skip the connect and
+  // surface a persistent install prompt instead (see composerBlockedMessage).
+  const { agents: acpAgents } = useAcpAgents()
+  const selectedAgentNotInstalled = useMemo(() => {
+    const info = acpAgents.find((a) => a.agent_type === selectedAgent)
+    return (
+      info != null && info.enabled && info.available && !info.installed_version
+    )
+  }, [acpAgents, selectedAgent])
   const canAutoConnect =
     (hasPersistedConversation || (agentsLoaded && usableAgentCount > 0)) &&
     !awaitingHistoricalSessionId &&
+    // Skip the doomed auto-connect for a not-installed agent ONLY in the draft
+    // surfaces, where the persistent install banner explains it instead. A
+    // persisted conversation keeps its existing connect-and-surface-the-error
+    // behavior (its agent can't be swapped from the picker anyway).
+    !(selectedAgentNotInstalled && !hasPersistedConversation) &&
     !(hasPersistedConversation && detailError) &&
     !(hasPersistedConversation && acpLoadError)
   const draftStorageKey = useMemo(() => {
@@ -532,41 +554,79 @@ const ConversationTabView = memo(function ConversationTabView({
     isViewerRef.current = conn.isViewer
   }, [conn.isViewer])
   const isConnecting = connStatus === "connecting"
+  // The tab's connection is keyed by a stable tabId, but agent switching is
+  // async — and for a not-installed target, connect()'s preflight throws BEFORE
+  // it tears down the old connection. So `conn` can still describe the PREVIOUS
+  // agent while `selectedAgent` has already advanced. When that's the case we
+  // must NOT surface the previous agent's selectors / ready-state as the
+  // selected one's: doing so showed the old agent's model + config list and
+  // (worse) let a send reach the wrong agent. Reconcile everything the composer
+  // reads against `selectedAgent`, falling back to that agent's own cached
+  // selectors (empty until it connects).
+  const connIsForOtherAgent =
+    conn.agentType != null && conn.agentType !== selectedAgent
+  const effectiveModes = connIsForOtherAgent
+    ? (getCachedSelectors(selectedAgent)?.modes ?? null)
+    : conn.modes
+  const effectiveConfigOptions = connIsForOtherAgent
+    ? (getCachedSelectors(selectedAgent)?.configOptions ?? null)
+    : conn.configOptions
   // The live connection is ready for THIS tab only when it's connected AND its
   // cwd matches the tab's intended working dir. A just-retargeted chat draft (or
   // any mid-reconnect) can briefly read a stale "connected" for the PREVIOUS cwd;
   // sending then would deliver the prompt to the wrong agent/workspace. Every
   // direct send gates on this (handleSend), mirroring the flush effect's guard.
   // No-op for normal conversations, whose connected cwd always equals intended.
-  const connectionReady = isConnectionReady(
-    connStatus,
-    conn.connectedWorkingDir,
-    workingDirForConnection
-  )
+  // A connection still bound to a different agent is never "ready" for the
+  // selected one — it would otherwise let a send reach the previous agent.
+  const connectionReady =
+    !connIsForOtherAgent &&
+    isConnectionReady(
+      connStatus,
+      conn.connectedWorkingDir,
+      workingDirForConnection
+    )
   // Present "connecting" to the composer while connected-but-not-ready, so it
   // disables its send affordance instead of inviting a submit handleSend rejects.
-  // Only ever differs from connStatus during that transient mismatch window.
-  const composerConnStatus =
-    connStatus === "connected" && !connectionReady ? "connecting" : connStatus
+  // While the live connection still belongs to a different agent, present the
+  // selected agent's real state: "disconnected" when it isn't installed (the
+  // install banner explains why), otherwise "connecting" (the switch is in
+  // flight). Only ever differs from connStatus during those transient windows.
+  const composerConnStatus = connIsForOtherAgent
+    ? selectedAgentNotInstalled
+      ? "disconnected"
+      : "connecting"
+    : connStatus === "connected" && !connectionReady
+      ? "connecting"
+      : connStatus
   const connectionModes = useMemo(
-    () => conn.modes?.available_modes ?? [],
-    [conn.modes?.available_modes]
+    () => effectiveModes?.available_modes ?? [],
+    [effectiveModes]
   )
   const connectionConfigOptions = useMemo(
-    () => conn.configOptions ?? [],
-    [conn.configOptions]
+    () => effectiveConfigOptions ?? [],
+    [effectiveConfigOptions]
   )
   const connectionCommands = useMemo(
-    () => conn.availableCommands ?? [],
-    [conn.availableCommands]
+    () => (connIsForOtherAgent ? [] : (conn.availableCommands ?? [])),
+    [connIsForOtherAgent, conn.availableCommands]
   )
   const selectedModeId = useMemo(() => {
     if (connectionModes.length === 0) return null
     if (modeId && connectionModes.some((mode) => mode.id === modeId)) {
       return modeId
     }
-    return conn.modes?.current_mode_id ?? connectionModes[0]?.id ?? null
-  }, [conn.modes?.current_mode_id, connectionModes, modeId])
+    return effectiveModes?.current_mode_id ?? connectionModes[0]?.id ?? null
+  }, [effectiveModes, connectionModes, modeId])
+
+  // The single blocking message shown in the composer's inline banner (clicking
+  // it opens Agent Settings). The not-installed prompt takes priority: it's the
+  // actionable one and, unlike the connect-time toast, it's deterministic — it
+  // appears the moment a not-installed agent is selected, independent of whether
+  // a (deduped/superseded) connect attempt ever reached the preflight.
+  const composerBlockedMessage = selectedAgentNotInstalled
+    ? tWelcome("agentNotInstalled", { agent: AGENT_LABELS[selectedAgent] })
+    : (autoConnectError ?? agentConnectError)
 
   useEffect(() => {
     if (connSessionId) {
@@ -1214,15 +1274,18 @@ const ConversationTabView = memo(function ConversationTabView({
   const handleModeChange = useCallback(
     (newModeId: string) => {
       setModeId(newModeId)
-      // Persist mode selection to localStorage immediately
-      if (conn.modes) {
+      // Persist mode selection to localStorage immediately. Use effectiveModes
+      // (reconciled to selectedAgent) rather than the raw connection modes, so a
+      // mode change made during a cross-agent switch window can't save the
+      // previous agent's mode shape under the selected agent.
+      if (effectiveModes) {
         saveModePreference(selectedAgent, {
-          ...conn.modes,
+          ...effectiveModes,
           current_mode_id: newModeId,
         })
       }
     },
-    [conn.modes, selectedAgent]
+    [effectiveModes, selectedAgent]
   )
 
   const handleAnswerQuestion = useCallback(
@@ -1490,7 +1553,7 @@ const ConversationTabView = memo(function ConversationTabView({
                 disabled={isConnecting || dbConversationId != null}
               />
             </div>
-            {autoConnectError || agentConnectError ? (
+            {composerBlockedMessage ? (
               <button
                 type="button"
                 onClick={handleOpenAgentsSettings}
@@ -1498,9 +1561,9 @@ const ConversationTabView = memo(function ConversationTabView({
               >
                 <div
                   className="overflow-hidden text-ellipsis whitespace-nowrap text-center"
-                  title={autoConnectError ?? agentConnectError ?? ""}
+                  title={composerBlockedMessage}
                 >
-                  {autoConnectError ?? agentConnectError}
+                  {composerBlockedMessage}
                 </div>
               </button>
             ) : null}
@@ -1561,7 +1624,7 @@ const ConversationTabView = memo(function ConversationTabView({
               onOpenAgentsSettings={handleOpenAgentsSettings}
               disabled={isConnecting || dbConversationId != null}
             />
-            {autoConnectError || agentConnectError ? (
+            {composerBlockedMessage ? (
               <button
                 type="button"
                 onClick={handleOpenAgentsSettings}
@@ -1569,9 +1632,9 @@ const ConversationTabView = memo(function ConversationTabView({
               >
                 <div
                   className="overflow-hidden text-ellipsis whitespace-nowrap text-center"
-                  title={autoConnectError ?? agentConnectError ?? ""}
+                  title={composerBlockedMessage}
                 >
-                  {autoConnectError ?? agentConnectError}
+                  {composerBlockedMessage}
                 </div>
               </button>
             ) : null}
@@ -1997,11 +2060,7 @@ export function ConversationDetailPanel() {
               onPointerDown={handleContextMenuTriggerPointerDown}
             >
               {/* Stable wrapper across canTile flip — otherwise sibling tabs remount and a live streaming response is torn down. */}
-              <ScrollArea
-                x={canTile ? "scroll" : "hidden"}
-                y="hidden"
-                className="h-full w-full"
-              >
+              <TileScrollContainer canTile={canTile}>
                 <div
                   className={cn(
                     "relative h-full",
@@ -2010,7 +2069,7 @@ export function ConversationDetailPanel() {
                 >
                   {tabElements}
                 </div>
-              </ScrollArea>
+              </TileScrollContainer>
             </div>
           </ContextMenuTrigger>
           <ContextMenuContent>

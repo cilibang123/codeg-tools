@@ -22,8 +22,8 @@ use sacp::schema::{
 use sacp::schema::{HttpHeader, McpServer, McpServerHttp, McpServerSse, McpServerStdio};
 use sacp::util::MatchDispatch;
 use sacp::{
-    on_receive_request, Agent, Client, ConnectionTo, Dispatch, Responder, SessionMessage,
-    UntypedMessage,
+    on_receive_request, Agent, Client, ConnectionTo, Dispatch, JsonRpcRequest, Responder,
+    SessionMessage, UntypedMessage,
 };
 use sacp_tokio::AcpAgent;
 use tokio::sync::{mpsc, RwLock};
@@ -2287,6 +2287,23 @@ async fn run_connection(
     let perms = pending_perms.clone();
     let state_outer = Arc::clone(&state);
 
+    // Grok's native `ask_user_question` (verified against 0.2.101) arrives as an
+    // `_x.ai/ask_user_question` ACP ext request that BLOCKS on the reply — rather
+    // than the codeg-mcp tool. Capture the shared question access + feature toggle
+    // (both live on the delegation injection) so the ext handler can register the
+    // questions through the SAME interactive-card pipeline and answer grok once the
+    // user submits. `None` when the companion isn't injected — the handler then
+    // lets grok fall back to its inert rendering.
+    let grok_ask_access = delegation_injection
+        .as_ref()
+        .map(|inj| (Arc::clone(&inj.questions), inj.ask.clone()));
+    let grok_ask_conn_id = connection_id.clone();
+    // The ext handler emits the answered in-stream card (`AskQuestionResultCard`)
+    // itself once the user submits — grok never emits a completed tool result into
+    // the ACP stream — so it needs this connection's session state + emitter.
+    let grok_ask_state = Arc::clone(&state);
+    let grok_ask_emitter = emitter.clone();
+
     // Claude-only: tail this connection's session transcript for OUT-OF-TURN
     // activity (async sub-agent / background-shell completions, the agent's
     // continued work after them, cron//loop autonomous turns — none of which
@@ -2416,6 +2433,29 @@ async fn run_connection(
                             responder: Responder<ReleaseTerminalResponse>,
                             _cx: ConnectionTo<Agent>| {
                     respond_terminal_request(responder, runtime.release_terminal(req).await)?;
+                    Ok(())
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let access = grok_ask_access.clone();
+                let conn_id = grok_ask_conn_id.clone();
+                let card_state = Arc::clone(&grok_ask_state);
+                let card_emitter = grok_ask_emitter.clone();
+                async move |req: GrokAskUserQuestionRequest,
+                            responder: Responder<serde_json::Value>,
+                            _cx: ConnectionTo<Agent>| {
+                    handle_grok_ask_user_question(
+                        &access,
+                        &conn_id,
+                        &card_state,
+                        &card_emitter,
+                        req,
+                        responder,
+                    )
+                    .await;
                     Ok(())
                 }
             },
@@ -3085,6 +3125,122 @@ async fn run_connection(
 }
 
 /// Store the permission responder and emit event to frontend.
+/// Grok's native `ask_user_question` tool issues this ACP ext request
+/// (`_x.ai/ask_user_question`) and BLOCKS on the reply — it does NOT go through
+/// the codeg-mcp ask tool. Transparent over the raw params object
+/// (`{sessionId, toolCallId, questions, mode}`); the fields codeg needs are read
+/// by [`crate::acp::question::parse_grok_ext_questions`]. sacp routes typed
+/// handlers on the RAW wire method, so the derive keeps the leading `_`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcRequest)]
+#[request(method = "_x.ai/ask_user_question", response = serde_json::Value)]
+#[serde(transparent)]
+struct GrokAskUserQuestionRequest(serde_json::Value);
+
+/// Bridge grok's native `_x.ai/ask_user_question` ext request into codeg's
+/// interactive question card. Grok blocks on the reply, so codeg registers the
+/// questions through the shared [`crate::acp::question::SessionQuestionAccess`] —
+/// the SAME path the codeg-mcp ask tool uses (it sets `pending_question`,
+/// broadcasts `QuestionRequest`, and the `AskQuestionCard` renders) — then answers
+/// the ext request with the user's choice, serialized to grok's own format, once
+/// they submit. Every early return responds with an error, which makes grok fall
+/// back to its inert fire-and-forget rendering — exactly the pre-bridge behavior,
+/// so no path here can regress it.
+async fn handle_grok_ask_user_question(
+    access: &Option<(
+        Arc<dyn crate::acp::question::SessionQuestionAccess>,
+        crate::acp::question::QuestionRuntimeConfig,
+    )>,
+    connection_id: &str,
+    state: &Arc<RwLock<SessionState>>,
+    emitter: &EventEmitter,
+    req: GrokAskUserQuestionRequest,
+    responder: Responder<serde_json::Value>,
+) {
+    let Some((questions, ask_cfg)) = access else {
+        let _ = responder.respond_with_internal_error("ask_user_question bridge unavailable");
+        return;
+    };
+    // Same kill switch as the codeg-mcp ask tool: when off, let grok fall back.
+    if !ask_cfg.is_enabled().await {
+        let _ = responder.respond_with_internal_error("ask_user_question is disabled");
+        return;
+    }
+    let specs = match crate::acp::question::parse_grok_ext_questions(&req.0) {
+        Ok(specs) => specs,
+        Err(e) => {
+            tracing::warn!("[grok ask] rejecting malformed ext request: {e}");
+            let _ =
+                responder.respond_with_internal_error(format!("invalid ask_user_question: {e}"));
+            return;
+        }
+    };
+    // Grok's tool_call_id correlates this ext ask with the (suppressed) native
+    // tool_call in the live stream; reuse it so the synthesized result card is the
+    // single card for that id. Absent → still answer grok, just skip the card.
+    let tool_call_id = req
+        .0
+        .get("toolCallId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    // register_question consumes the specs; keep a copy to render the answered
+    // in-stream card once the user submits.
+    let card_specs = specs.clone();
+    let Some(registered) = questions.register_question(connection_id, specs).await else {
+        // Connection gone, or an ask is already pending on this connection.
+        let _ = responder.respond_with_internal_error("could not register ask_user_question");
+        return;
+    };
+    // The user answers out-of-band (the HTTP `answer_question` endpoint resolves
+    // the one-shot below), so await it on a task — keeping the ACP dispatch loop
+    // free — then reply to grok's blocked ext request.
+    let state = Arc::clone(state);
+    let emitter = emitter.clone();
+    tokio::spawn(async move {
+        match registered.answer_rx.await {
+            Ok(outcome) => {
+                // Surface the answered "提问回答" capsule in-stream — the codeg-mcp
+                // ask parity grok's native tool never emits into the ACP stream (it
+                // resolves the answer over THIS ext round-trip). Emit BEFORE
+                // unblocking grok so the card lands ahead of grok's follow-up text;
+                // grok is blocked on this reply, so nothing races the emit. The
+                // matching raw ask tool_call/updates are suppressed in the live loop
+                // (see `grok_ask_tool_ids`), so this synthesized event — keyed by the
+                // same id — is the only card for the ask.
+                if let Some(tool_call_id) = tool_call_id {
+                    emit_with_state(
+                        &state,
+                        &emitter,
+                        AcpEvent::ToolCall {
+                            tool_call_id,
+                            title: "ask_user_question".to_string(),
+                            kind: "other".to_string(),
+                            status: "completed".to_string(),
+                            content: None,
+                            raw_input: Some(
+                                crate::acp::question::grok_result_card_input(&card_specs)
+                                    .to_string(),
+                            ),
+                            raw_output: Some(
+                                crate::acp::question::grok_result_card_output(&outcome).to_string(),
+                            ),
+                            locations: None,
+                            meta: None,
+                            images: None,
+                        },
+                    )
+                    .await;
+                }
+                let _ = responder.respond(crate::acp::question::build_grok_ext_response(&outcome));
+            }
+            // Sender dropped: the ask was canceled or the connection tore down —
+            // nothing to render; let grok fall back via skip_interview.
+            Err(_) => {
+                let _ = responder.respond(crate::acp::question::grok_ext_skip_response());
+            }
+        }
+    });
+}
+
 async fn handle_permission_request(
     state: &Arc<RwLock<SessionState>>,
     emitter: &EventEmitter,
@@ -5595,6 +5751,30 @@ struct CodeBuddyLiveState {
     /// has recorded its override by then), so the set tracks only in-flight
     /// calls.
     cursor_generic_mcp_ids: HashSet<String>,
+    /// Grok tool_call ids whose interactive question already renders via the
+    /// `_x.ai/ask_user_question` ext bridge (`handle_grok_ask_user_question`). The
+    /// redundant native `tool_call` / `tool_call_update` stream for these is
+    /// dropped so the card doesn't double-render; tracked by id because a later
+    /// status-only update may drop the `x.ai/tool` meta that first identified it.
+    grok_ask_tool_ids: HashSet<String>,
+}
+
+/// True when a tool call's ACP `_meta` marks it as grok's native
+/// `ask_user_question` (`x.ai/tool.kind == "ask_user"`). Codeg answers grok's
+/// blocking `_x.ai/ask_user_question` ext request by rendering the interactive
+/// `AskQuestionCard` (see `handle_grok_ask_user_question`), so the parallel
+/// `tool_call` stream grok emits for the same call is redundant — it is dropped
+/// live so the question doesn't render twice (once answerable, once inert).
+fn grok_meta_marks_ask_user(
+    agent_type: AgentType,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    matches!(agent_type, AgentType::Grok)
+        && meta
+            .and_then(|m| m.get("x.ai/tool"))
+            .and_then(|t| t.get("kind"))
+            .and_then(|k| k.as_str())
+            == Some("ask_user")
 }
 
 /// Resolve a tool call's title, honoring an authoritative rewrite recorded for
@@ -5809,6 +5989,14 @@ async fn emit_conversation_update(
         }
         SessionUpdate::ToolCall(tc) => {
             let tool_call_id = tc.tool_call_id.to_string();
+            // Grok emits a redundant `tool_call` for its native ask_user_question
+            // alongside the blocking `_x.ai/ask_user_question` ext request codeg
+            // answers with the interactive card; drop it here (remembering the id so
+            // later status-only updates that lost the meta are dropped too).
+            if grok_meta_marks_ask_user(agent_type, tc.meta.as_ref()) {
+                cb_state.grok_ask_tool_ids.insert(tool_call_id);
+                return;
+            }
             // CodeBuddy double-wraps a deferred MCP result as a `{type,text}`
             // content part; peel it (in both the content and raw_output channels)
             // so the dedicated delegation cards parse it instead of showing raw JSON.
@@ -5941,6 +6129,14 @@ async fn emit_conversation_update(
         }
         SessionUpdate::ToolCallUpdate(tcu) => {
             let tool_call_id = tcu.tool_call_id.to_string();
+            // Suppress the redundant update stream for grok's ask_user_question
+            // (see the ToolCall arm): match the tracked id, or the meta on a late
+            // update that still carries it.
+            if cb_state.grok_ask_tool_ids.contains(&tool_call_id)
+                || grok_meta_marks_ask_user(agent_type, tcu.meta.as_ref())
+            {
+                return;
+            }
             // Peel CodeBuddy's `{type,text}` deferred-MCP wrapper here too — the
             // result often arrives on an update (see raw_output below).
             // Same Diff→canonical-edit hoist as the initial ToolCall path: the
@@ -6206,6 +6402,47 @@ async fn emit_conversation_update(
 mod tests {
     use super::*;
     use sacp::schema::Diff;
+
+    #[test]
+    fn grok_ask_ext_request_routes_and_parses_captured_wire_shape() {
+        use sacp::JsonRpcMessage;
+        // Routing: the derive matches ONLY the underscore-prefixed ext method
+        // (sacp routes typed handlers on the raw wire method — verified against
+        // grok 0.2.101, where the missing underscore made codeg answer "unhandled"
+        // and grok fall back to inert rendering).
+        assert!(GrokAskUserQuestionRequest::matches_method(
+            "_x.ai/ask_user_question"
+        ));
+        assert!(!GrokAskUserQuestionRequest::matches_method(
+            "x.ai/ask_user_question"
+        ));
+        assert!(!GrokAskUserQuestionRequest::matches_method("session/prompt"));
+
+        // The exact params grok sends (captured from a real 0.2.101 run): the
+        // transparent newtype must deserialize them and the raw object must parse
+        // into register-valid specs.
+        let params = serde_json::json!({
+            "sessionId": "019f70eb-32e5-7692-ae92-86fb6cb916a5",
+            "toolCallId": "call-1af86ae7-ed54-440e-a983-2c5d22aa6682-0",
+            "questions": [{
+                "question": "What is your favorite color?",
+                "options": [
+                    { "label": "Red", "description": "Red" },
+                    { "label": "Green", "description": "Green" },
+                    { "label": "Blue", "description": "Blue" }
+                ],
+                "multiSelect": false
+            }],
+            "mode": "default"
+        });
+        let req: GrokAskUserQuestionRequest = serde_json::from_value(params).unwrap();
+        let specs = crate::acp::question::parse_grok_ext_questions(&req.0).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].question, "What is your favorite color?");
+        assert_eq!(specs[0].options.len(), 3);
+        assert!(!specs[0].multi_select);
+        crate::acp::question::validate_specs(&specs).unwrap();
+    }
 
     fn diff_content(path: &str, old: Option<&str>, new: &str) -> ToolCallContent {
         let mut d = Diff::new(path, new);

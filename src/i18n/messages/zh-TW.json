@@ -117,6 +117,29 @@
       "sectionTitle": "模式選擇區域",
       "sectionDescription": "新會話頁面輸入框上方顯示的「程式開發 / 日常辦公」快捷卡片區域。",
       "showQuickActions": "在新會話頁面顯示"
+    },
+    "workspaceBackground": {
+      "sectionTitle": "工作區背景",
+      "sectionDescription": "在整個工作區背後顯示一張圖片。側邊欄與面板會變半透明並磨砂讓圖片透出，遮罩確保文字可讀。",
+      "enable": "啟用背景圖片",
+      "image": "圖片",
+      "chooseImage": "選擇圖片",
+      "replaceImage": "更換圖片",
+      "removeImage": "移除",
+      "fillMode": "填滿方式",
+      "fillModes": {
+        "cover": "覆蓋",
+        "contain": "適應",
+        "center": "置中",
+        "tile": "平鋪"
+      },
+      "maskOpacity": "遮罩不透明度",
+      "maskOpacityHint": "數值越高，圖片越向主題背景色淡化，文字對比越清晰。",
+      "imageBlur": "圖片模糊",
+      "panelOpacity": "面板不透明度",
+      "panelOpacityHint": "側邊欄、面板與標籤列的不透明程度。越低，透出的圖片越多。",
+      "errorTooLarge": "圖片太大（最大 16 MB）。",
+      "errorUploadFailed": "設定背景圖片失敗。"
     }
   },
   "SystemSettings": {
@@ -2209,7 +2232,8 @@
         "enableAgentFirstPlaceholder": "請先啟用至少一個 Agent 後開始會話...",
         "prepareSessionFailed": "無法準備聊天工作階段，請重試。",
         "createConversationFailed": "無法建立會話，請重試。",
-        "askAnythingPlaceholder": "請開始輸入..."
+        "askAnythingPlaceholder": "請開始輸入...",
+        "agentNotInstalled": "{agent} 尚未安裝 · 點擊前往 Agents 設定安裝"
       },
       "welcomePanel": {
         "greeting": "今天打算<highlight>做些什麼</highlight>呢？",
@@ -2309,7 +2333,8 @@
       },
       "agentSelector": {
         "noEnabledAgents": "暫無已啟用的 Agent",
-        "openAgentsSettings": "開啟 Agents 設定"
+        "openAgentsSettings": "開啟 Agents 設定",
+        "notInstalled": "未安裝"
       },
       "subAgentOverlay": {
         "title": "子智能體",

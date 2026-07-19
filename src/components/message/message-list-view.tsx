@@ -99,7 +99,7 @@ interface MessageListViewProps {
   showMessageNav?: boolean
 }
 
-interface ResolvedMessageGroup {
+export interface ResolvedMessageGroup {
   id: string
   role: "user" | "assistant" | "system"
   parts: AdaptedContentPart[]
@@ -117,7 +117,7 @@ interface ResolvedMessageGroup {
   completed_at?: string | null
 }
 
-type ThreadRenderItem =
+export type ThreadRenderItem =
   | {
       key: string
       kind: "turn"
@@ -250,6 +250,27 @@ function extractTextFromParts(parts: AdaptedContentPart[]): string {
 
 type AssistantTurnItem = Extract<ThreadRenderItem, { kind: "turn" }>
 
+/**
+ * Cache entry for one merged assistant run, keyed on the run's FIRST member
+ * group. Valid only while every member's group reference and item key still
+ * match: group identity flows through the per-turn adapter + group caches, so
+ * member-group equality implies unchanged content AND sourceTurns, while the
+ * keys embed phase/id/index so ordering or phase drift invalidates too. A run
+ * containing the streaming turn misses every batch by construction (the
+ * streaming turn re-adapts per batch) — that residual rebuild is the point;
+ * purely historical runs hit and keep their group/parts/sourceTurns
+ * references stable so HistoricalMessageGroup's memo bails out.
+ */
+export interface MergedAssistantRunCacheEntry {
+  memberGroups: ResolvedMessageGroup[]
+  memberKeys: string[]
+  item: AssistantTurnItem
+}
+export type MergedAssistantRunCache = WeakMap<
+  ResolvedMessageGroup,
+  MergedAssistantRunCacheEntry
+>
+
 function isEmptyTurnItem(item: ThreadRenderItem): boolean {
   if (item.kind !== "turn") return false
   const g = item.group
@@ -269,11 +290,30 @@ function isEmptyTurnItem(item: ThreadRenderItem): boolean {
  * Exported for tests.
  */
 export function mergeConsecutiveAssistantTurns(
-  items: ThreadRenderItem[]
+  items: ThreadRenderItem[],
+  mergeCache?: MergedAssistantRunCache
 ): ThreadRenderItem[] {
   const result: ThreadRenderItem[] = []
   const skipped: ThreadRenderItem[] = []
   let buffer: AssistantTurnItem[] = []
+
+  // Push the cached merged item instead of rebuilding when the run's
+  // membership (group references + item keys) is unchanged since last render.
+  const reuseCachedMergedRun = (): boolean => {
+    if (!mergeCache) return false
+    const cached = mergeCache.get(buffer[0].group)
+    if (!cached || cached.memberGroups.length !== buffer.length) return false
+    for (let i = 0; i < buffer.length; i++) {
+      if (
+        buffer[i].group !== cached.memberGroups[i] ||
+        buffer[i].key !== cached.memberKeys[i]
+      ) {
+        return false
+      }
+    }
+    result.push(cached.item)
+    return true
+  }
 
   const flush = () => {
     if (buffer.length === 0) {
@@ -285,6 +325,8 @@ export function mergeConsecutiveAssistantTurns(
 
     if (buffer.length === 1) {
       result.push(buffer[0])
+    } else if (reuseCachedMergedRun()) {
+      // Reused — nothing to rebuild.
     } else {
       const allParts = buffer.flatMap((it) => it.group.parts)
       // A goal run straddling these merged sub-turns is still live only if the
@@ -348,7 +390,7 @@ export function mergeConsecutiveAssistantTurns(
         }
       }
 
-      result.push({
+      const merged: AssistantTurnItem = {
         ...last,
         key: `merged-${first.key}`,
         // Concatenate every sub-turn's raw turns so the artifacts card sees all
@@ -364,6 +406,12 @@ export function mergeConsecutiveAssistantTurns(
           models: mergedModels.length > 1 ? mergedModels : undefined,
           completed_at: mergedCompletedAt,
         },
+      }
+      result.push(merged)
+      mergeCache?.set(first.group, {
+        memberGroups: buffer.map((it) => it.group),
+        memberKeys: buffer.map((it) => it.key),
+        item: merged,
       })
     }
 
@@ -609,6 +657,12 @@ export function MessageListView({
     () => new WeakMap()
   )
 
+  // Reuses merged multi-sub-turn assistant items across streaming-batch
+  // re-renders — see MergedAssistantRunCacheEntry for the validity contract.
+  const [mergedRunCache] = useState<MergedAssistantRunCache>(
+    () => new WeakMap()
+  )
+
   const { threadItems, nonStreamingAdapted } = useMemo(() => {
     const allTurns = timelineTurns.map((item) => item.turn)
     const streamingIndices = new Set<number>()
@@ -673,7 +727,7 @@ export function MessageListView({
 
     // Collapse consecutive assistant turn render items into a single rendered
     // turn, so tool-groups straddling a turn boundary fold into one collapsible.
-    const items = mergeConsecutiveAssistantTurns(rawItems)
+    const items = mergeConsecutiveAssistantTurns(rawItems, mergedRunCache)
 
     // Compute showStats, isRoleTransition, and previousUserIndex for each turn.
     // previousUserIndex points at the closest preceding user turn (used by the
@@ -682,6 +736,12 @@ export function MessageListView({
     for (let idx = 0; idx < items.length; idx++) {
       const item = items[idx]
       if (item.kind !== "turn") continue
+
+      // Reset before recomputing: a cached merged item carries last render's
+      // values and the conditions below only ever assign `true`.
+      item.showStats = false
+      item.isRoleTransition = false
+      item.previousUserIndex = null
 
       // isRoleTransition: role differs from previous turn item
       if (idx > 0) {
@@ -721,6 +781,7 @@ export function MessageListView({
     timelineTurns,
     turnAdapter,
     groupCache,
+    mergedRunCache,
   ])
 
   const historicalPlanEntries = useMemo(

@@ -261,8 +261,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Cline",
             description: "Autonomous coding agent CLI",
             distribution: AgentDistribution::Npx {
-                version: "3.0.42",
-                package: "cline@3.0.42",
+                version: "3.0.44",
+                package: "cline@3.0.44",
                 cmd: "cline",
                 args: &["--acp"],
                 env: &[],
@@ -336,8 +336,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "CodeBuddy",
             description: "Tencent Cloud's official AI coding assistant (ACP)",
             distribution: AgentDistribution::Npx {
-                version: "2.123.1",
-                package: "@tencent-ai/codebuddy-code@2.123.1",
+                version: "2.124.0",
+                package: "@tencent-ai/codebuddy-code@2.124.0",
                 cmd: "codebuddy",
                 args: &["--acp"],
                 env: &[],
@@ -350,8 +350,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Kimi Code",
             description: "Moonshot AI's official CLI coding assistant (ACP)",
             distribution: AgentDistribution::Npx {
-                version: "0.26.0",
-                package: "@moonshot-ai/kimi-code@0.26.0",
+                version: "0.27.0",
+                package: "@moonshot-ai/kimi-code@0.27.0",
                 cmd: "kimi",
                 args: &["acp"],
                 env: &[],
@@ -407,8 +407,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // leading `KEY=value` argv and sacp's `parse_env_var` only accepts
             // `[A-Za-z0-9_]` env names, which npm's `@scope:registry` key is not.)
             distribution: AgentDistribution::Npx {
-                version: "0.2.101",
-                package: "@xai-official/grok@0.2.101",
+                version: "0.2.103",
+                package: "@xai-official/grok@0.2.103",
                 cmd: "grok",
                 // Only the ACP subcommand lives here. Grok's ROOT-level launch
                 // flags (`--no-auto-update` always, `--permission-mode <value>`
@@ -419,7 +419,7 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
                 // args rather than appending after.
                 args: &["agent", "stdio"],
                 env: &[],
-                // `@xai-official/grok@0.2.101` declares `engines.node: ">=20"`;
+                // `@xai-official/grok@0.2.103` declares `engines.node: ">=20"`;
                 // surface that in preflight so Node 18 isn't silently accepted.
                 node_required: Some("20.0.0"),
             },
@@ -621,20 +621,20 @@ mod tests {
         );
         assert_npx_version(
             AgentType::Cline,
-            "3.0.42",
-            "cline@3.0.42",
+            "3.0.44",
+            "cline@3.0.44",
             Some("22.0.0"),
         );
         assert_npx_version(
             AgentType::CodeBuddy,
-            "2.123.1",
-            "@tencent-ai/codebuddy-code@2.123.1",
+            "2.124.0",
+            "@tencent-ai/codebuddy-code@2.124.0",
             Some("22.0.0"),
         );
         assert_npx_version(
             AgentType::KimiCode,
-            "0.26.0",
-            "@moonshot-ai/kimi-code@0.26.0",
+            "0.27.0",
+            "@moonshot-ai/kimi-code@0.27.0",
             Some("22.19.0"),
         );
         assert_npx_version(
@@ -646,8 +646,8 @@ mod tests {
         assert_npx_version(AgentType::Pi, "0.0.31", "pi-acp@0.0.31", Some("22.0.0"));
         assert_npx_version(
             AgentType::Grok,
-            "0.2.101",
-            "@xai-official/grok@0.2.101",
+            "0.2.103",
+            "@xai-official/grok@0.2.103",
             Some("20.0.0"),
         );
         assert_binary_version(AgentType::OpenCode, "1.18.3", "/releases/download/v1.18.3/");
