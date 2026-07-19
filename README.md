@@ -26,24 +26,38 @@
 - 本机已登录（按需）：`codex login`、`grok login`
 - Linux root 可写 systemd；macOS 用 launchd（用户级）
 
-## 安装
+## 安装（推荐：一行命令）
 
 ```bash
-cd codeg-quota-addon
+curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | bash
+```
+
+需要写系统目录 / systemd 时：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | sudo bash
+```
+
+macOS 桌面 App 也注入：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cilibang123/codeg-tools/main/get.sh | bash -s -- --desktop
+```
+
+> `get.sh` 会自动下载完整安装包并执行 `install.sh`，无需手动 clone。
+
+### 本地已有仓库时
+
+```bash
+cd codeg-tools
 chmod +x install.sh uninstall.sh
-
-# 交互选择系统
-./install.sh
-
-# 或指定
+./install.sh                 # 全自动
 ./install.sh --os linux
 ./install.sh --os macos              # macOS WebUI + 本机 sidecar
 ./install.sh --os macos --desktop    # 再注入 codeg.app
 ./install.sh --os auto -y            # 自动检测，非交互
-
-# 仅装服务 / 仅挂前端
-./install.sh --os linux --sidecar-only
-./install.sh --os linux --web-only --web-dir /usr/local/share/codeg/web
+./install.sh --sidecar-only
+./install.sh --web-only --web-dir /usr/local/share/codeg/web
 ```
 
 ### 常用参数
