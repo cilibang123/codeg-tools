@@ -2474,7 +2474,9 @@
         "tokenCacheWrite": "كتابة التخزين المؤقت",
         "duration": "المدة",
         "completedAt": "وقت الإنجاز",
-        "jumpToPreviousUserMessage": "الانتقال إلى رسالة المستخدم"
+        "jumpToPreviousUserMessage": "الانتقال إلى رسالة المستخدم",
+        "showMore": "عرض المزيد",
+        "showLess": "طي"
       },
       "liveTurnStats": {
         "thinking": "جارٍ التفكير...",

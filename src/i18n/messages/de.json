@@ -2474,7 +2474,9 @@
         "tokenCacheWrite": "Cache-Schreiben",
         "duration": "Dauer",
         "completedAt": "Abgeschlossen um",
-        "jumpToPreviousUserMessage": "Zur Benutzernachricht springen"
+        "jumpToPreviousUserMessage": "Zur Benutzernachricht springen",
+        "showMore": "Mehr anzeigen",
+        "showLess": "Weniger anzeigen"
       },
       "liveTurnStats": {
         "thinking": "Denkt nach...",

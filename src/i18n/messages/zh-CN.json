@@ -2474,7 +2474,9 @@
         "tokenCacheWrite": "缓存写入",
         "duration": "耗时",
         "completedAt": "完成时间",
-        "jumpToPreviousUserMessage": "跳转到上一条用户消息"
+        "jumpToPreviousUserMessage": "跳转到上一条用户消息",
+        "showMore": "展开",
+        "showLess": "收起"
       },
       "liveTurnStats": {
         "thinking": "思考中...",
