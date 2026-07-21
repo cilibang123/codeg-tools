@@ -347,23 +347,43 @@ impl TerminalRuntime {
         let mut child = match direct.spawn() {
             Ok(child) => child,
             Err(err)
-                if err.kind() == std::io::ErrorKind::NotFound
-                    && request.args.is_empty()
-                    && request.command.contains(char::is_whitespace) =>
+                if should_retry_via_shell(
+                    &err,
+                    request.args.is_empty(),
+                    request.command.contains(char::is_whitespace),
+                ) =>
             {
+                // Prefer `sh -c <line>` so pipes/&&/$VAR work. If the line is
+                // so large that argv itself fails (E2BIG), fall back to a temp
+                // script file — the only remaining OS-safe path.
                 let mut shell = shell_wrapped_command(&request.command);
                 self.configure_command(&mut shell, &request);
-                shell.spawn().map_err(|err| {
-                    TerminalRuntimeError::Internal(format!(
-                        "failed to spawn terminal command {}: {err}",
-                        request.command
-                    ))
-                })?
+                match shell.spawn() {
+                    Ok(child) => child,
+                    Err(shell_err) if is_arg_list_too_long(&shell_err) => {
+                        let req = &request;
+                        spawn_via_temp_script(&request.command, |cmd| {
+                            self.configure_command(cmd, req);
+                        })
+                        .map_err(|err| {
+                            TerminalRuntimeError::Internal(format!(
+                                "failed to spawn terminal command {} via temp script: {err}",
+                                truncate_for_error(&request.command)
+                            ))
+                        })?
+                    }
+                    Err(shell_err) => {
+                        return Err(TerminalRuntimeError::Internal(format!(
+                            "failed to spawn terminal command {}: {shell_err}",
+                            truncate_for_error(&request.command)
+                        )));
+                    }
+                }
             }
             Err(err) => {
                 return Err(TerminalRuntimeError::Internal(format!(
                     "failed to spawn terminal command {}: {err}",
-                    request.command
+                    truncate_for_error(&request.command)
                 )));
             }
         };
@@ -582,6 +602,116 @@ where
             Err(_) => break,
         }
     }
+}
+
+/// Whether a failed direct spawn should be retried via the platform shell.
+///
+/// Agents (notably Grok) often put an entire shell line into `command` with
+/// empty `args`. A short line that is not a real executable yields `NotFound`;
+/// a multi-KB line (e.g. `/usr/bin/bash -lc "<script>"`) yields
+/// `ENAMETOOLONG` because the OS treats the whole string as a program path.
+/// Both must fall through to `shell_wrapped_command`. Other errors (permission,
+/// invalid cwd, etc.) are left alone so real failures surface.
+fn should_retry_via_shell(
+    err: &std::io::Error,
+    args_empty: bool,
+    command_has_whitespace: bool,
+) -> bool {
+    if !args_empty || !command_has_whitespace {
+        return false;
+    }
+    match err.kind() {
+        std::io::ErrorKind::NotFound => true,
+        // Older Rust mapped ENAMETOOLONG here; keep for compatibility.
+        std::io::ErrorKind::InvalidInput => true,
+        // Current Rust maps ENAMETOOLONG to InvalidFilename.
+        std::io::ErrorKind::InvalidFilename => true,
+        _ => match err.raw_os_error() {
+            // ENAMETOOLONG on Linux / macOS
+            Some(36) => true,
+            // ERROR_FILENAME_EXCED_RANGE on Windows
+            Some(206) => true,
+            _ => {
+                let msg = err.to_string();
+                msg.contains("File name too long") || msg.contains("filename too long")
+            }
+        },
+    }
+}
+
+fn is_arg_list_too_long(err: &std::io::Error) -> bool {
+    // E2BIG on Unix; Windows ERROR_FILENAME_EXCED_RANGE / related can surface
+    // for oversized command lines.
+    matches!(err.raw_os_error(), Some(7) | Some(206))
+        || err.to_string().contains("Argument list too long")
+}
+
+/// Keep error strings readable when agents stuff multi-KB scripts into
+/// `command` (otherwise logs and RPC payloads balloon).
+fn truncate_for_error(command: &str) -> String {
+    const MAX: usize = 240;
+    if command.len() <= MAX {
+        return command.to_string();
+    }
+    let mut end = MAX;
+    while end > 0 && !command.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}…(+{} bytes)",
+        &command[..end],
+        command.len().saturating_sub(end)
+    )
+}
+
+/// Last-resort spawn path: write the shell line to a temp script and exec the
+/// platform shell against that path. Used when even `sh -c <line>` fails with
+/// E2BIG because the argv payload exceeds ARG_MAX.
+fn spawn_via_temp_script(
+    line: &str,
+    configure: impl FnOnce(&mut tokio::process::Command),
+) -> Result<tokio::process::Child, std::io::Error> {
+    let dir = std::env::temp_dir().join("codeg-terminal-scripts");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{}.sh", uuid::Uuid::new_v4().simple()));
+    // Ensure the script exits with the inner command's status and is deleted
+    // after the shell starts (best-effort; process may outlive this fn).
+    let script = format!("#!/bin/sh\nexec /bin/sh -c {}\n", shell_quote_for_script(line));
+    std::fs::write(&path, script.as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path)?.permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&path, perms)?;
+    }
+    let mut command = crate::process::tokio_command(&path);
+    configure(&mut command);
+    let result = command.spawn();
+    // Best-effort cleanup of the script file. If the child still needs it, the
+    // kernel keeps the inode until the open fd/exec completes; for `sh path`
+    // the shell re-opens by path, so we only delete after a failed spawn.
+    // On success we leave the file and unlink asynchronously after a short
+    // delay so the shell has time to open it.
+    match &result {
+        Ok(_) => {
+            let cleanup = path.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let _ = std::fs::remove_file(cleanup);
+            });
+        }
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    result
+}
+
+/// Quote a string for embedding as a single `/bin/sh -c` argument inside a
+/// generated script file (POSIX single-quote escaping).
+fn shell_quote_for_script(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Wrap a full shell command line so it executes through the platform shell.
@@ -964,5 +1094,69 @@ mod tests {
             output.contains("ran-relative"),
             "relative space-containing exe was not run in the effective cwd; got:\n{output}"
         );
+    }
+
+    /// Grok (and some other ACP agents) put an entire shell invocation into
+    /// `command` with empty `args`, e.g. `/usr/bin/bash -lc "<multi-KB script>"`.
+    /// Direct `exec` treats that whole string as a program path and fails with
+    /// ENAMETOOLONG once it exceeds PATH_MAX. The runtime must shell-wrap
+    /// instead of surfacing "File name too long".
+    #[tokio::test]
+    async fn long_bash_lc_command_line_runs_via_shell_not_enametoolong() {
+        let runtime = TerminalRuntime::with_base_env(BTreeMap::new());
+        let session_id = SessionId::new("long-bash-lc".to_string());
+        // Padding alone exceeds PATH_MAX (~4096 on Linux) so the full command
+        // string cannot be a valid executable path.
+        let padding = "x".repeat(5000);
+        let command = format!("/usr/bin/bash -lc 'echo GROK_LONG_OK; : {padding}'");
+        assert!(
+            command.len() > 4096,
+            "test setup must exceed PATH_MAX; got {}",
+            command.len()
+        );
+        let request = CreateTerminalRequest::new(session_id.clone(), command);
+        let output = run_and_capture(&runtime, &session_id, request).await;
+        assert!(
+            output.contains("GROK_LONG_OK"),
+            "expected long bash -lc line to run via shell wrap; got:\n{output}"
+        );
+    }
+
+    /// Multi-line python/heredoc style payloads (the shape that dominated
+    /// production "File name too long" failures) must also succeed.
+    #[tokio::test]
+    async fn long_multiline_python_lc_command_runs_via_shell() {
+        let runtime = TerminalRuntime::with_base_env(BTreeMap::new());
+        let session_id = SessionId::new("long-python-lc".to_string());
+        let body = format!(
+            "import sys\nprint('PY_LONG_OK')\n# {}\n",
+            "n".repeat(4500)
+        );
+        // Mirror Grok: whole `bash -lc "..."` in `command`, empty args.
+        let command = format!("/usr/bin/bash -lc {}", shell_single_quote(&body));
+        assert!(command.len() > 4096);
+        let request = CreateTerminalRequest::new(session_id.clone(), command);
+        let output = run_and_capture(&runtime, &session_id, request).await;
+        assert!(
+            output.contains("PY_LONG_OK"),
+            "expected long multiline bash -lc payload to run; got:\n{output}"
+        );
+    }
+
+    /// Helper: single-quote a string for embedding in `bash -lc '...'`.
+    fn shell_single_quote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+
+    #[test]
+    fn shell_retry_accepts_enametoolong_and_not_found() {
+        let not_found = std::io::Error::from_raw_os_error(2); // ENOENT
+        let name_too_long = std::io::Error::from_raw_os_error(36); // ENAMETOOLONG
+        let perm = std::io::Error::from_raw_os_error(13); // EACCES
+        assert!(should_retry_via_shell(&not_found, true, true));
+        assert!(should_retry_via_shell(&name_too_long, true, true));
+        assert!(!should_retry_via_shell(&perm, true, true));
+        assert!(!should_retry_via_shell(&name_too_long, false, true)); // has args
+        assert!(!should_retry_via_shell(&name_too_long, true, false)); // no whitespace
     }
 }

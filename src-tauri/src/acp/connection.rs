@@ -870,7 +870,18 @@ pub async fn spawn_agent_connection(
         }
 
         if let Err(e) = result {
+            // Always log terminal failures at WARN so mass disconnects
+            // (process_exited, transport EOF, spawn crash) leave a greppable
+            // trail in codeg-server logs — the Error event alone is only
+            // visible to the frontend.
             let code = e.code().map(String::from);
+            tracing::warn!(
+                connection_id = %conn_id,
+                agent = ?agent_type,
+                error_code = ?code,
+                error = %e,
+                "[ACP] agent connection ended with error (will disconnect)"
+            );
             emit_with_state(
                 &state_clone,
                 &emitter_clone,
@@ -899,6 +910,12 @@ pub async fn spawn_agent_connection(
                 },
             )
             .await;
+        } else {
+            tracing::info!(
+                connection_id = %conn_id,
+                agent = ?agent_type,
+                "[ACP] agent connection ended cleanly"
+            );
         }
 
         emit_with_state(
