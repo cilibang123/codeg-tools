@@ -1738,7 +1738,11 @@
         "confirmApply": "¿Aplicar stash {ref} al directorio de trabajo?",
         "cancel": "Cancelar"
       },
-      "deleteBranch": "Eliminar rama"
+      "deleteBranch": "Eliminar rama",
+      "searchPlaceholder": "Buscar ramas y acciones",
+      "searchAriaLabel": "Buscar ramas y acciones",
+      "branchListLabel": "Ramas y acciones",
+      "noMatches": "Sin coincidencias"
     },
     "commitDialog": {
       "toasts": {

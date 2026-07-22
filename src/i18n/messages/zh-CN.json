@@ -1738,7 +1738,11 @@
         "confirmApply": "将贮藏 {ref} 应用到工作目录？",
         "cancel": "取消"
       },
-      "deleteBranch": "删除分支"
+      "deleteBranch": "删除分支",
+      "searchPlaceholder": "搜索分支和操作",
+      "searchAriaLabel": "搜索分支和操作",
+      "branchListLabel": "分支和操作",
+      "noMatches": "无匹配项"
     },
     "commitDialog": {
       "toasts": {

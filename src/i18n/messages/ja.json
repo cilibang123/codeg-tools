@@ -1738,7 +1738,11 @@
         "confirmApply": "スタッシュ {ref} を作業ディレクトリに適用しますか？",
         "cancel": "キャンセル"
       },
-      "deleteBranch": "ブランチを削除"
+      "deleteBranch": "ブランチを削除",
+      "searchPlaceholder": "ブランチと操作を検索",
+      "searchAriaLabel": "ブランチと操作を検索",
+      "branchListLabel": "ブランチと操作",
+      "noMatches": "一致する項目がありません"
     },
     "commitDialog": {
       "toasts": {

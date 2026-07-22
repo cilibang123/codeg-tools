@@ -1738,7 +1738,11 @@
         "confirmApply": "스태시 {ref}을(를) 작업 디렉토리에 적용하시겠습니까?",
         "cancel": "취소"
       },
-      "deleteBranch": "브랜치 삭제"
+      "deleteBranch": "브랜치 삭제",
+      "searchPlaceholder": "브랜치 및 작업 검색",
+      "searchAriaLabel": "브랜치 및 작업 검색",
+      "branchListLabel": "브랜치 및 작업",
+      "noMatches": "일치하는 항목 없음"
     },
     "commitDialog": {
       "toasts": {

@@ -1738,7 +1738,11 @@
         "confirmApply": "Apply stash {ref} to working directory?",
         "cancel": "Cancel"
       },
-      "deleteBranch": "Delete branch"
+      "deleteBranch": "Delete branch",
+      "searchPlaceholder": "Search branches and actions",
+      "searchAriaLabel": "Search branches and actions",
+      "branchListLabel": "Branches and actions",
+      "noMatches": "No matches"
     },
     "commitDialog": {
       "toasts": {

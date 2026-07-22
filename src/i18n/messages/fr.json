@@ -1738,7 +1738,11 @@
         "confirmApply": "Appliquer la remise {ref} au répertoire de travail ?",
         "cancel": "Annuler"
       },
-      "deleteBranch": "Supprimer la branche"
+      "deleteBranch": "Supprimer la branche",
+      "searchPlaceholder": "Rechercher des branches et actions",
+      "searchAriaLabel": "Rechercher des branches et actions",
+      "branchListLabel": "Branches et actions",
+      "noMatches": "Aucune correspondance"
     },
     "commitDialog": {
       "toasts": {

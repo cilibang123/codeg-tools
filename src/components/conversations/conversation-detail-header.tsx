@@ -252,7 +252,12 @@ export const ConversationDetailHeader = memo(function ConversationDetailHeader({
           className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50"
           aria-hidden
         />
-        <span className="truncate text-sm text-foreground/90" title={title}>
+        {/* min-w-0 flex-1: the title absorbs the remaining width and takes the
+            ellipsis, so the folder crumb on the left stays fully visible. */}
+        <span
+          className="min-w-0 flex-1 truncate text-sm text-foreground/90"
+          title={title}
+        >
           {displayTitle}
         </span>
       </div>
