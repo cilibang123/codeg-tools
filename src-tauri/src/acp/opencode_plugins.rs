@@ -213,18 +213,42 @@ fn installed_plugin_package_json(
     name: &str,
     declared_spec: &str,
 ) -> Option<PathBuf> {
-    let current = cache_dir
-        .join("packages")
-        .join(declared_spec)
-        .join("node_modules")
-        .join(name)
-        .join("package.json");
+    let package_json = |spec: &str| {
+        cache_dir
+            .join("packages")
+            .join(spec)
+            .join("node_modules")
+            .join(name)
+            .join("package.json")
+    };
+    let current = package_json(declared_spec);
+    if current.exists() {
+        return Some(current);
+    }
+
+    let declared_version = declared_spec
+        .strip_prefix(name)
+        .and_then(|suffix| suffix.strip_prefix('@'));
+    if let Some(version) = declared_version.filter(|version| *version != "latest") {
+        // Pinning updates the config, but OpenCode keeps the package in its original @latest cache.
+        let floating = package_json(&format!("{name}@latest"));
+        if read_package_version(&floating).as_deref() == Some(version) {
+            return Some(floating);
+        }
+    }
+
     let legacy = cache_dir
         .join("node_modules")
         .join(name)
         .join("package.json");
+    if !legacy.exists() {
+        return None;
+    }
+    if let Some(version) = declared_version.filter(|version| *version != "latest") {
+        return (read_package_version(&legacy).as_deref() == Some(version)).then_some(legacy);
+    }
 
-    [current, legacy].into_iter().find(|path| path.exists())
+    Some(legacy)
 }
 
 fn read_package_version(package_json: &Path) -> Option<String> {
@@ -768,6 +792,7 @@ mod tests {
         fs::create_dir_all(&config_dir).unwrap();
 
         write_cached_plugin(&cache_dir, "foo@latest", "foo", "1.2.3");
+        write_cached_plugin(&cache_dir, "stale@latest", "stale", "1.0.0");
         write_cached_plugin(&cache_dir, "@scope/bar", "@scope/bar", "4.5.6");
 
         let local_plugin = tmp.path().join("local plugin.mjs");
@@ -782,7 +807,13 @@ mod tests {
         fs::write(
             config_dir.join("opencode.json"),
             serde_json::json!({
-                "plugin": ["foo@latest", "@scope/bar", local_spec, missing_spec]
+                "plugin": [
+                    "foo@1.2.3",
+                    "stale@2.0.0",
+                    "@scope/bar",
+                    local_spec,
+                    missing_spec
+                ]
             })
             .to_string(),
         )
@@ -803,11 +834,12 @@ mod tests {
                         .unwrap()
                 };
 
-                assert_eq!(plugin("foo@latest").status, PluginStatus::Installed);
+                assert_eq!(plugin("foo@1.2.3").status, PluginStatus::Installed);
                 assert_eq!(
-                    plugin("foo@latest").installed_version.as_deref(),
+                    plugin("foo@1.2.3").installed_version.as_deref(),
                     Some("1.2.3")
                 );
+                assert_eq!(plugin("stale@2.0.0").status, PluginStatus::Missing);
                 assert_eq!(plugin("@scope/bar").status, PluginStatus::Installed);
                 assert_eq!(
                     plugin("@scope/bar").installed_version.as_deref(),
