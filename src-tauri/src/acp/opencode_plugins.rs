@@ -89,8 +89,8 @@ fn has_project_opencode_config(project_root: &Path) -> bool {
     candidates.iter().any(|p| p.exists())
 }
 
-/// Inspect `~/.config/opencode/opencode.json` and `~/.cache/opencode/node_modules/`
-/// to determine which declared plugins are installed and which are missing.
+/// Inspect the OpenCode config and cache to determine which declared plugins
+/// are installed and which are missing.
 pub fn check_opencode_plugins(project_root: Option<&Path>) -> Result<PluginCheckSummary, String> {
     let config_path = opencode_config_path()
         .ok_or_else(|| "Cannot determine opencode config directory".to_string())?;
@@ -163,23 +163,23 @@ pub fn check_opencode_plugins(project_root: Option<&Path>) -> Result<PluginCheck
             continue; // duplicate, skip
         }
 
-        // Check node_modules/<name>/package.json
-        let pkg_json_path = cache_dir
-            .join("node_modules")
-            .join(&name)
-            .join("package.json");
-
-        let (status, installed_version) = if pkg_json_path.exists() {
-            let version = std::fs::read_to_string(&pkg_json_path)
-                .ok()
-                .and_then(|content| {
-                    serde_json::from_str::<serde_json::Value>(&content)
-                        .ok()?
-                        .get("version")?
-                        .as_str()
-                        .map(|s| s.to_string())
-                });
-            (PluginStatus::Installed, version)
+        let (status, installed_version) = if is_local_plugin_spec(&declared_spec) {
+            let installed = local_plugin_path(&declared_spec).is_some_and(|path| path.exists());
+            (
+                if installed {
+                    PluginStatus::Installed
+                } else {
+                    PluginStatus::Missing
+                },
+                None,
+            )
+        } else if let Some(pkg_json_path) =
+            installed_plugin_package_json(&cache_dir, &name, &declared_spec)
+        {
+            (
+                PluginStatus::Installed,
+                read_package_version(&pkg_json_path),
+            )
         } else {
             (PluginStatus::Missing, None)
         };
@@ -197,6 +197,43 @@ pub fn check_opencode_plugins(project_root: Option<&Path>) -> Result<PluginCheck
         cache_dir,
         plugins,
         has_project_config_hint,
+    })
+}
+
+fn is_local_plugin_spec(spec: &str) -> bool {
+    spec.trim().starts_with("file://")
+}
+
+fn local_plugin_path(spec: &str) -> Option<PathBuf> {
+    reqwest::Url::parse(spec).ok()?.to_file_path().ok()
+}
+
+fn installed_plugin_package_json(
+    cache_dir: &Path,
+    name: &str,
+    declared_spec: &str,
+) -> Option<PathBuf> {
+    let current = cache_dir
+        .join("packages")
+        .join(declared_spec)
+        .join("node_modules")
+        .join(name)
+        .join("package.json");
+    let legacy = cache_dir
+        .join("node_modules")
+        .join(name)
+        .join("package.json");
+
+    [current, legacy].into_iter().find(|path| path.exists())
+}
+
+fn read_package_version(package_json: &Path) -> Option<String> {
+    fs::read_to_string(package_json).ok().and_then(|content| {
+        serde_json::from_str::<serde_json::Value>(&content)
+            .ok()?
+            .get("version")?
+            .as_str()
+            .map(str::to_string)
     })
 }
 
@@ -333,17 +370,11 @@ fn pin_latest_specs(
         if !declared.ends_with("@latest") {
             continue;
         }
-        let pkg_json = cache_dir
-            .join("node_modules")
-            .join(name)
-            .join("package.json");
-        if let Ok(content) = fs::read_to_string(&pkg_json) {
-            if let Some(version) = serde_json::from_str::<serde_json::Value>(&content)
-                .ok()
-                .and_then(|v| v.get("version")?.as_str().map(|s| s.to_string()))
-            {
-                pin_map.push((name.clone(), version));
-            }
+        if let Some(version) = installed_plugin_package_json(cache_dir, name, declared)
+            .as_deref()
+            .and_then(read_package_version)
+        {
+            pin_map.push((name.clone(), version));
         }
     }
 
@@ -423,6 +454,7 @@ pub async fn install_missing_plugins(
         .plugins
         .iter()
         .filter(|p| p.status == PluginStatus::Missing)
+        .filter(|p| !is_local_plugin_spec(&p.declared_spec))
         .filter(|p| match &names {
             Some(list) => list.contains(&p.name),
             None => true,
@@ -630,6 +662,10 @@ pub async fn uninstall_plugin(name: String) -> Result<PluginCheckSummary, String
         });
     }
 
+    if is_local_plugin_spec(&name) {
+        return check_opencode_plugins(None);
+    }
+
     // Step 2: bun remove
     let bun = resolve_bun_binary()?;
     let output = crate::process::tokio_command(&bun)
@@ -659,6 +695,7 @@ pub async fn uninstall_plugin(name: String) -> Result<PluginCheckSummary, String
 /// - `"foo@1.2.3"` → `Some(("foo", "foo@1.2.3"))`
 /// - `"@scope/name"` → `Some(("@scope/name", "@scope/name"))`
 /// - `"@scope/name@1.2.3"` → `Some(("@scope/name", "@scope/name@1.2.3"))`
+/// - `"file:///tmp/plugin.mjs"` → the full URL as both name and spec
 /// - `""` → `None`
 pub fn parse_plugin_spec(spec: &str) -> Option<(String, String)> {
     let spec = spec.trim();
@@ -667,6 +704,10 @@ pub fn parse_plugin_spec(spec: &str) -> Option<(String, String)> {
     }
 
     let full_spec = spec.to_string();
+
+    if is_local_plugin_spec(spec) {
+        return Some((full_spec.clone(), full_spec));
+    }
 
     if spec.starts_with('@') {
         // Scoped package: @scope/name or @scope/name@version
@@ -692,5 +733,89 @@ pub fn parse_plugin_spec(spec: &str) -> Option<(String, String)> {
         } else {
             Some((spec.to_string(), full_spec))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_cached_plugin(cache_dir: &Path, spec: &str, name: &str, version: &str) {
+        let package_dir = cache_dir.join("packages").join(spec);
+        fs::create_dir_all(package_dir.join("node_modules").join(name)).unwrap();
+        fs::write(
+            package_dir.join("package.json"),
+            serde_json::json!({ "dependencies": { name: version } }).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            package_dir
+                .join("node_modules")
+                .join(name)
+                .join("package.json"),
+            serde_json::json!({ "name": name, "version": version }).to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn current_cache_and_local_plugins_are_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_home = tmp.path().join("config");
+        let cache_home = tmp.path().join("cache");
+        let config_dir = config_home.join("opencode");
+        let cache_dir = cache_home.join("opencode");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        write_cached_plugin(&cache_dir, "foo@latest", "foo", "1.2.3");
+        write_cached_plugin(&cache_dir, "@scope/bar", "@scope/bar", "4.5.6");
+
+        let local_plugin = tmp.path().join("local plugin.mjs");
+        fs::write(&local_plugin, "export default {};").unwrap();
+        let local_spec = reqwest::Url::from_file_path(&local_plugin)
+            .unwrap()
+            .to_string();
+        let missing_spec = reqwest::Url::from_file_path(tmp.path().join("missing.mjs"))
+            .unwrap()
+            .to_string();
+
+        fs::write(
+            config_dir.join("opencode.json"),
+            serde_json::json!({
+                "plugin": ["foo@latest", "@scope/bar", local_spec, missing_spec]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        temp_env::with_vars(
+            [
+                ("XDG_CONFIG_HOME", Some(config_home.as_path())),
+                ("XDG_CACHE_HOME", Some(cache_home.as_path())),
+            ],
+            || {
+                let summary = check_opencode_plugins(None).unwrap();
+                let plugin = |spec: &str| {
+                    summary
+                        .plugins
+                        .iter()
+                        .find(|plugin| plugin.declared_spec == spec)
+                        .unwrap()
+                };
+
+                assert_eq!(plugin("foo@latest").status, PluginStatus::Installed);
+                assert_eq!(
+                    plugin("foo@latest").installed_version.as_deref(),
+                    Some("1.2.3")
+                );
+                assert_eq!(plugin("@scope/bar").status, PluginStatus::Installed);
+                assert_eq!(
+                    plugin("@scope/bar").installed_version.as_deref(),
+                    Some("4.5.6")
+                );
+                assert_eq!(plugin(&local_spec).status, PluginStatus::Installed);
+                assert_eq!(plugin(&missing_spec).status, PluginStatus::Missing);
+            },
+        );
     }
 }
